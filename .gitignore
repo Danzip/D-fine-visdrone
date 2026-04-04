@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environment
+D-FINE/venv/
+
+# Large model files (download separately)
+D-FINE/output/
+D-FINE/weight/
+dfine_app_server/models/
+
+# Dataset (too large)
+D-FINE/data/
+
+# Flutter build artifacts
+dfine_app/build/
+dfine_app/.dart_tool/
+dfine_app/.flutter-plugins
+dfine_app/.flutter-plugins-dependencies
+
+# D-FINE is its own repo — track as submodule, not inline
+D-FINE/
+
+# Logs
+*.log
+nohup.out
