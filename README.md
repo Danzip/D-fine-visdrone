@@ -6,15 +6,24 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 
 ## Results
 
+**Accuracy** (VisDrone val, standard eval, 640×640 input):
+
 | Stage | Model | AP50:95 | AP50 | Notes |
 |-------|-------|---------|------|-------|
-| COCO baseline | D-FINE-S | 48.5% | 65.4% | Reproduced paper result exactly |
-| VisDrone fine-tuned | D-FINE-S | **23.1%** | **38.9%** | 72 epochs, cosine LR, 640×640 |
-| After pruning + recovery | D-FINE-S (pruned) | **23.2%** | — | 41.4% FFN reduction, beats baseline |
-| Edge deployment | INT8 (Snapdragon 8 Gen 2) | — | — | **47ms / 21 FPS**, 100% NPU |
+| COCO baseline | D-FINE-S | 48.5% | 65.4% | Matched reported paper result |
+| VisDrone fine-tuned | D-FINE-S | **23.1%** | **38.9%** | 72 epochs, cosine LR |
+| After pruning + recovery | D-FINE-S (pruned) | **23.2%** | — | 41.4% FFN reduction, slightly improves AP50:95 over fine-tuned checkpoint after recovery |
 
-SOTA context (standard eval, no slicing): UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 = 28.4%.
-D-FINE-S achieves 73% of SOTA accuracy with a 10M parameter model on a laptop GPU.
+SOTA context: UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches 23.1% with a 10M parameter model trained on a single laptop GPU — gap is explained by model size and input resolution (640px vs 1280–1536px in SOTA).
+
+**Edge deployment** (Samsung Galaxy S23, Snapdragon 8 Gen 2, INT8):
+
+| Metric | Value |
+|--------|-------|
+| Inference latency (median) | **47 ms** |
+| Throughput | **~21 FPS** |
+| NPU utilization | **100%** (1316/1317 ops on Hexagon v73) |
+| Model size | ~10 MB INT8 (vs 38 MB FP32 ONNX) |
 
 ---
 
@@ -23,6 +32,38 @@ D-FINE-S achieves 73% of SOTA accuracy with a 10M parameter model on a laptop GP
 ![D-FINE-S detecting vehicles and pedestrians on VisDrone aerial footage](demo.gif)
 
 *D-FINE-S (pruned, INT8-ready) running on VisDrone validation images — 10-class aerial detection at 21 FPS on Snapdragon 8 Gen 2.*
+
+---
+
+## Key Engineering Decisions
+
+- **Chose D-FINE-S over larger models** — 10M params fits comfortably in mobile VRAM; the FDR distribution head recovers localization quality that pure scale would require more parameters to match
+- **Used VisDrone to stress-test domain transfer** — COCO pretraining gives strong priors, but aerial viewpoint and dense tiny objects require deliberate fine-tuning; switching from MultiStepLR to CosineAnnealingLR alone lifted AP from 0.170 → 0.231
+- **Applied structured pruning to decoder FFNs specifically** — profiling showed decoder FFN layers dominated latency; group lasso regularization let the model self-select which neurons to drop, achieving 41.4% FFN reduction without architectural surgery
+- **Exported to ONNX then compiled INT8 via Qualcomm AI Hub** — ONNX gives hardware-neutral export; AI Hub handles INT8 quantization and Hexagon NPU mapping, offloading the quantization complexity entirely
+- **Built a side-by-side inference server** — comparing D-FINE-S against YOLOv8-X in the same app makes the accuracy/efficiency tradeoff concrete rather than abstract
+
+---
+
+## Limitations
+
+- AP trails published VisDrone-specific SOTA (23.1% vs 31.5%) — gap is primarily input resolution; attempts to train at 1280px failed due to anchor grid mismatch with the dataset size
+- Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 0.142
+- SAHI sliced inference improved AP-small (+0.011) but hurt overall AP (-0.006) due to patch-boundary fragmentation of larger objects — no clean win
+- Accuracy comparison against YOLOv8-X favors YOLO (AP50 0.470 vs 0.389) — expected given 68M vs 10M parameters; D-FINE-S is the better deployment target, not the better accuracy target
+
+---
+
+## Why VisDrone is Hard
+
+| Property | VisDrone | COCO |
+|----------|----------|------|
+| Viewpoint | Aerial / top-down | Ground level |
+| Objects/image | 53–70 | ~7 |
+| Tiny objects (< 32px) | 46–53% | ~15% |
+| Classes | 10 (vehicles + pedestrians) | 80 |
+
+Classes: `pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor`
 
 ---
 
@@ -56,7 +97,7 @@ DFine/
 
 ### D-FINE Innovations
 
-**FDR (Fine-grained Distribution Refinement):** Instead of predicting a single (Δx,Δy,Δw,Δh) offset per box edge, the model predicts a probability distribution over `reg_max=32` bins. The final edge position is a weighted average over non-uniformly spaced bins. This lets the model express uncertainty and produces tighter boxes than single-point regression.
+**FDR (Fine-grained Distribution Refinement):** Instead of predicting a single (Δx,Δy,Δw,Δh) offset per box edge, the model predicts a probability distribution over `reg_max=32` non-uniformly spaced bins. The final edge position is the weighted expectation over those bins. This lets the model express localization uncertainty and produces tighter boxes than single-point regression.
 
 **GO-LSD (Global Optimal Localization Self-Distillation):** The final decoder layer's predicted distributions are used as soft targets for earlier layers during training. Zero inference overhead — only active during the forward pass at training time.
 
@@ -137,11 +178,6 @@ python tools/deployment/submit_aihub.py \
     --onnx output/pruning_recovery/best_recovery.onnx
 ```
 
-**Edge results (Samsung Galaxy S23, Snapdragon 8 Gen 2):**
-- Latency: **47ms median** / **~21 FPS**
-- NPU utilization: **100%** (1316/1317 ops on Hexagon v73)
-- Model size: ~10MB INT8 (vs 38MB FP32 ONNX)
-
 ---
 
 ## Inference
@@ -193,28 +229,6 @@ The server loads both models at startup. `POST /detect` accepts `file` + `model`
 |-------|--------|---------|------|
 | D-FINE-S (ours, pruned) | 10M | 0.232 | 0.389 |
 | YOLOv8-X (mshamrai HuggingFace) | 68M | — | 0.470 |
-
----
-
-## Dataset — VisDrone2019-DET
-
-10-class aerial detection dataset from drone footage. Key challenges vs COCO:
-
-| Property | VisDrone | COCO |
-|----------|----------|------|
-| Viewpoint | Aerial / top-down | Ground level |
-| Objects/image | 53–70 | ~7 |
-| Tiny objects (< 32px) | 46–53% | ~15% |
-| Classes | 10 (vehicles + pedestrians) | 80 |
-
-Classes: `pedestrian, people, bicycle, car, van, truck, tricycle, awning-tricycle, bus, motor`
-
-**Dataset conversion** (VisDrone txt → COCO JSON):
-```bash
-python tools/visdrone2coco.py \
-    --visdrone-root dataset/visdrone \
-    --output-dir dataset/visdrone/annotations
-```
 
 ---
 
