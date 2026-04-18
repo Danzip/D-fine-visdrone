@@ -18,6 +18,14 @@ D-FINE-S achieves 73% of SOTA accuracy with a 10M parameter model on a laptop GP
 
 ---
 
+## Demo
+
+![D-FINE-S detecting vehicles and pedestrians on VisDrone aerial footage](demo.gif)
+
+*D-FINE-S (pruned, INT8-ready) running on VisDrone validation images — 10-class aerial detection at 21 FPS on Snapdragon 8 Gen 2.*
+
+---
+
 ## What This Repo Contains
 
 ```
