@@ -6,24 +6,14 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 
 ## Results
 
-**Accuracy** (VisDrone val, standard eval, 640×640 input):
+| Stage | AP50:95 | AP50 | Latency | Model Size |
+|-------|---------|------|---------|------------|
+| COCO pretrained (baseline) | 48.5% (COCO val) | 65.4% | — | 38 MB FP32 |
+| VisDrone fine-tuned | 23.1% | 38.9% | — | 38 MB FP32 |
+| + Structured pruning + recovery | **23.2%** | — | — | ~28 MB FP32 |
+| INT8 on Snapdragon 8 Gen 2 | — | — | **47 ms / 21 FPS** | **10 MB INT8** |
 
-| Stage | Model | AP50:95 | AP50 | Notes |
-|-------|-------|---------|------|-------|
-| COCO baseline | D-FINE-S | 48.5% | 65.4% | Matched reported paper result |
-| VisDrone fine-tuned | D-FINE-S | **23.1%** | **38.9%** | 72 epochs, cosine LR |
-| After pruning + recovery | D-FINE-S (pruned) | **23.2%** | — | 41.4% FFN reduction, slightly improves AP50:95 over fine-tuned checkpoint after recovery |
-
-SOTA context: UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches 23.1% with a 10M parameter model trained on a single laptop GPU — gap is explained by model size and input resolution (640px vs 1280–1536px in SOTA).
-
-**Edge deployment** (Samsung Galaxy S23, Snapdragon 8 Gen 2, INT8):
-
-| Metric | Value |
-|--------|-------|
-| Inference latency (median) | **47 ms** |
-| Throughput | **~21 FPS** |
-| NPU utilization | **100%** (1316/1317 ops on Hexagon v73) |
-| Model size | ~10 MB INT8 (vs 38 MB FP32 ONNX) |
+SOTA context (VisDrone val, standard eval): UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 (2023) = 28.4%. Gap vs SOTA is explained by model size (10M vs 50M+ params) and input resolution (640px vs 1280–1536px). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
 
 ---
 
@@ -37,11 +27,11 @@ SOTA context: UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S 
 
 ## Key Engineering Decisions
 
-- **Chose D-FINE-S over larger models** — 10M params fits comfortably in mobile VRAM; the FDR distribution head recovers localization quality that pure scale would require more parameters to match
-- **Used VisDrone to stress-test domain transfer** — COCO pretraining gives strong priors, but aerial viewpoint and dense tiny objects require deliberate fine-tuning; switching from MultiStepLR to CosineAnnealingLR alone lifted AP from 0.170 → 0.231
-- **Applied structured pruning to decoder FFNs specifically** — profiling showed decoder FFN layers dominated latency; group lasso regularization let the model self-select which neurons to drop, achieving 41.4% FFN reduction without architectural surgery
-- **Exported to ONNX then compiled INT8 via Qualcomm AI Hub** — ONNX gives hardware-neutral export; AI Hub handles INT8 quantization and Hexagon NPU mapping, offloading the quantization complexity entirely
-- **Built a side-by-side inference server** — comparing D-FINE-S against YOLOv8-X in the same app makes the accuracy/efficiency tradeoff concrete rather than abstract
+- **D-FINE-S over YOLO or larger DETR variants** — sacrifices ~8 AP points vs YOLOv8-X but is 7× smaller; for Snapdragon NPU deployment, parameter efficiency matters more than peak accuracy, and the FDR distribution head compensates for scale
+- **CosineAnnealingLR over MultiStepLR** — milestone-based decay never fired in 72 epochs on this dataset; switching to cosine alone lifted AP from 0.170 → 0.231 (+36%), no architecture change
+- **Decoder FFNs as pruning target** — decoder FFN layers dominated inference cost; used group lasso regularization to let the model self-select neuron importance rather than applying a fixed compression ratio, achieving 41.4% reduction with no AP regression
+- **640px as final input resolution** — ran 4 attempts at 960–1280px; all failed due to anchor grid mismatch when transferring a 640px checkpoint to 2.3× more spatial positions; concluded that 6.5k training images is insufficient to re-learn the proposal grid at higher resolution
+- **ONNX + Qualcomm AI Hub over on-device PyTorch** — AI Hub handles Hexagon NPU mapping and INT8 quantization automatically; offloads hardware-specific compiler complexity and gives profiling data (latency, memory, NPU utilization) without owning a device
 
 ---
 
