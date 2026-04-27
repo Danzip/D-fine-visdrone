@@ -6,14 +6,54 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 
 ## Results
 
-| Stage | AP50:95 | AP50 | Latency | Model Size |
-|-------|---------|------|---------|------------|
-| COCO pretrained (baseline) | 48.5% (COCO val) | 65.4% | — | 38 MB FP32 |
-| VisDrone fine-tuned | 23.1% | 38.9% | — | 38 MB FP32 |
-| + Structured pruning + recovery | **23.2%** | — | — | ~28 MB FP32 |
-| INT8 on Snapdragon 8 Gen 2 | — | — | **47 ms / 21 FPS** | **10 MB INT8** |
+| Stage | AP50:95 | AP50 | AP-small | Latency | Model Size |
+|-------|---------|------|----------|---------|------------|
+| COCO pretrained (baseline) | 48.5% (COCO val) | 65.4% | — | — | 38 MB FP32 |
+| VisDrone fine-tuned (640px) | 23.1% | 38.9% | 14.2% | — | 38 MB FP32 |
+| + Structured pruning + recovery | 23.2% | — | — | — | ~28 MB FP32 |
+| Multi-scale training 1024px (80 ep) | 25.5% | 42.4% | 17.8% | — | 38 MB FP32 |
+| + Extended training (131 ep) | 29.7% | 47.9% | 20.8% | — | 38 MB FP32 |
+| + Mosaic + RFS retraining (in progress) | **30.2%** | **48.3%** | **21.1%** | — | 38 MB FP32 |
+| INT8 on Snapdragon 8 Gen 2 | — | — | — | **47 ms / 21 FPS** | **10 MB INT8** |
 
-SOTA context (VisDrone val, standard eval): UAV-DETR-R50 (2025) = 31.5%, RT-DETR-R50 (2023) = 28.4%. Gap vs SOTA is explained by model size (10M vs 50M+ params) and input resolution (640px vs 1280–1536px). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
+SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches 29.7% with 10M params as a general-purpose detector fine-tuned on VisDrone — gap to same-size SOTA is ~6 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
+
+### Per-class AP — epoch-131 checkpoint (baseline for Mosaic+RFS retraining)
+
+| Class | Train freq | AP50:95 | AP50 | AP-small | AP-med | AP-large |
+|-------|-----------|---------|------|----------|--------|---------|
+| car | 42% | **0.619** | **0.858** | 0.453 | 0.750 | **0.873** |
+| bus | 5% | 0.458 | 0.607 | 0.232 | 0.575 | 0.856 |
+| van | 8% | 0.373 | 0.516 | 0.203 | 0.519 | 0.586 |
+| pedestrian | 22% | 0.286 | 0.562 | 0.247 | 0.523 | **0.843** |
+| motor | 11% | 0.294 | 0.591 | 0.265 | 0.416 | 0.561 |
+| truck | 4% | 0.284 | 0.395 | 0.124 | 0.322 | 0.604 |
+| people | 14% | 0.213 | 0.486 | 0.201 | 0.327 | 0.648 |
+| tricycle | 3% | 0.201 | 0.334 | 0.161 | 0.262 | 0.491 |
+| bicycle | 4% | 0.129 | 0.253 | 0.097 | 0.275 | 0.316 |
+| awning-tricycle | 1% | **0.110** | **0.185** | **0.094** | **0.144** | **0.113** |
+| **mean** | | **0.297** | **0.479** | **0.208** | **0.411** | **0.589** |
+
+The two rarest classes (awning-tricycle 1%, tricycle 3%) are the weakest. RFS oversampling and Mosaic augmentation in the current retraining run specifically target this gap.
+
+---
+
+## Inference-Time Ablation (no retraining)
+
+All experiments run on the epoch-131 checkpoint (AP=29.7%, 1024px eval). Multi-scale training already internalizes the benefits that inference-time tricks try to add — none improved on standard eval. Full analysis in `PROJECT_NOTES/11_eval_ablations.md`.
+
+| Method | AP50:95 | AP-small | Delta | Verdict |
+|--------|---------|----------|-------|---------|
+| Standard eval (1024×1024) | **29.7%** | **20.8%** | — | Best |
+| Eval at 1280×1280 | 29.6% | 21.2% | −0.1% | No gain |
+| SAHI 1024px slices | 28.0% | 19.9% | −1.7% | Hurts |
+| SAHI 640px slices (→1024px) | 28.3% | 20.8% | −1.4% | Hurts |
+| TTA 1024px + hflip (WBF) | 27.6% | 18.4% | −2.1% | Hurts |
+| TTA 3-scale + hflip (WBF) | 28.0% | 19.1% | −1.7% | Hurts |
+| SWA ep107+119+131 | 29.5% | — | −0.2% | Negligible |
+| SWA ep119+131 | 29.6% | 20.7% | ±0 | Neutral |
+
+**Why everything fails:** Each trick assumes the model hasn't learned something — scale invariance (SAHI, TTA), flip invariance (TTA hflip), or basin convergence (SWA). After 130+ epochs of [768–1280] multi-scale training with `RandomHorizontalFlip` and copy-paste augmentation, all of these are already internalized. The only lever left is retraining with new signal: new augmentation diversity (mosaic, now in progress) or architectural changes (P2 detection head, NWD loss).
 
 ---
 
@@ -30,17 +70,18 @@ SOTA context (VisDrone val, standard eval): UAV-DETR-R50 (2025) = 31.5%, RT-DETR
 - **D-FINE-S over YOLO or larger DETR variants** — sacrifices ~8 AP points vs YOLOv8-X but is 7× smaller; for Snapdragon NPU deployment, parameter efficiency matters more than peak accuracy, and the FDR distribution head compensates for scale
 - **CosineAnnealingLR over MultiStepLR** — milestone-based decay never fired in 72 epochs on this dataset; switching to cosine alone lifted AP from 0.170 → 0.231 (+36%), no architecture change
 - **Decoder FFNs as pruning target** — decoder FFN layers dominated inference cost; used group lasso regularization to let the model self-select neuron importance rather than applying a fixed compression ratio, achieving 41.4% reduction with no AP regression
-- **640px as final input resolution** — ran 4 attempts at 960–1280px; all failed due to anchor grid mismatch when transferring a 640px checkpoint to 2.3× more spatial positions; concluded that 6.5k training images is insufficient to re-learn the proposal grid at higher resolution
+- **Multi-scale training from COCO (not from 640px checkpoint)** — 4 direct attempts to train at 960–1280px all failed (AP flatlined at 0.11–0.13); root cause was anchor grid collapse when jumping from 8,400 → 19,320 positions. The fix: start from the COCO checkpoint with multi-scale [768–1280] from epoch 0, so the model never locks into a single-scale prior. This lifted AP from 0.231 → 0.297 (+28%).
+- **Adaptive batch size over fixed batch** — training at 1280px with fixed batch=2 would waste capacity at 768px and OOM at 1280px; adaptive batch keeps total pixel budget constant (`n ∝ (base_size/sz)²`), giving effective batch=8 across all scales
 - **ONNX + Qualcomm AI Hub over on-device PyTorch** — AI Hub handles Hexagon NPU mapping and INT8 quantization automatically; offloads hardware-specific compiler complexity and gives profiling data (latency, memory, NPU utilization) without owning a device
 
 ---
 
 ## Limitations
 
-- AP trails published VisDrone-specific SOTA (23.1% vs 31.5%) — gap is primarily input resolution; attempts to train at 1280px failed due to anchor grid mismatch with the dataset size
-- Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 0.142
-- SAHI sliced inference improved AP-small (+0.011) but hurt overall AP (-0.006) due to patch-boundary fragmentation of larger objects — no clean win
-- Accuracy comparison against YOLOv8-X favors YOLO (AP50 0.470 vs 0.389) — expected given 68M vs 10M parameters; D-FINE-S is the better deployment target, not the better accuracy target
+- AP trails published VisDrone-specific SOTA (30.2% vs 35.6% DroneScan-YOLO) — gap is primarily architectural: purpose-built models add a P2 stride-4 detection head and NWD loss tuned for sub-16px objects; D-FINE-S uses a general-purpose FPN without aerial-specific modifications
+- Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 21.1% (up from 14.2% at 640px, but still low — awning-tricycle and bicycle AP are well below the mean)
+- All inference-time tricks tested (SAHI, TTA, SWA, higher eval resolution) failed to improve over standard eval — the model's multi-scale training already internalizes what these try to add
+- Current best (30.2%) is mid-run: mosaic retraining is 12/96 epochs in; phase 2 polishing (epochs 80–95) hasn't run yet
 
 ---
 
@@ -184,11 +225,18 @@ python tools/inference/onnx_inf.py \
     --onnx output/pruning_recovery/best_recovery.onnx \
     --input image.jpg
 
-# SAHI (sliced) inference — improves AP-small slightly, use with care
+# SAHI (sliced) inference — tested, does NOT improve AP on this model (see ablation table)
 python tools/inference/sahi_inf.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    -r output/pruning_recovery/best_recovery.pth \
-    --input image.jpg
+    -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_cont.yml \
+    -r output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
+    --input image.jpg --slice-size 1024
+
+# TTA (multi-scale + flip) — also tested, hurts due to WBF noise; shown for completeness
+python tools/inference/tta_inf.py \
+    -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_cont.yml \
+    -r output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
+    --ann dataset/visdrone/annotations/instances_val.json \
+    --img-dir dataset/visdrone/VisDrone2019-DET-val/images
 ```
 
 ---
@@ -217,7 +265,8 @@ The server loads both models at startup. `POST /detect` accepts `file` + `model`
 
 | Model | Params | AP50:95 | AP50 |
 |-------|--------|---------|------|
-| D-FINE-S (ours, pruned) | 10M | 0.232 | 0.389 |
+| D-FINE-S (ours, current best) | 10M | 0.302 | 0.483 |
+| D-FINE-S (ours, pruned INT8) | 10M | 0.232 | 0.389 |
 | YOLOv8-X (mshamrai HuggingFace) | 68M | — | 0.470 |
 
 ---
@@ -235,8 +284,11 @@ All decisions, experiments, results, and bugs are documented in `D-FINE/PROJECT_
 | `04_finetuning_config.md` | Fine-tuning configuration decisions |
 | `05_wsl2_aws_kubernetes.md` | WSL2 migration + AWS/K8s plan |
 | `06_aws_kubernetes_setup.md` | AWS setup log |
-| `06_bugs_and_fixes.md` | All bugs encountered and fixed |
+| `06_bugs_and_fixes.md` | All bugs encountered and fixed (BUG-001 → BUG-017) |
 | `07_pruning.md` | Full pruning results table, epoch-by-epoch |
+| `09_multiscale_training.md` | Multi-scale training runs 1–3, full AP trajectories, why it worked |
+| `10_sota_gap_analysis.md` | Gap to DroneScan-YOLO: what they do differently, what's transferable |
+| `11_eval_ablations.md` | Deep dive: every inference-time trick tried, why each failed |
 
 ---
 
