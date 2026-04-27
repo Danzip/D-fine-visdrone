@@ -1,0 +1,142 @@
+# D-FINE-S fine-tuned on VisDrone at 1280×736 (letterboxed, aspect-ratio-preserving)
+#
+# Starting point: output/dfine_hgnetv2_s_visdrone/best_stg1.pth (72-epoch baseline, AP=0.231)
+#
+# Why 1280×736?
+#   - VisDrone images are 4:3 (46.7%) and 16:9 (53.3%) — no square images exist.
+#   - 640×640 square both distorts AND downscales: avg only ~32% pixels preserved.
+#   - 1280×736 letterbox: avg ~60% pixels preserved. 16:9 images → 1280×720 + 16px pad;
+#     4:3 images → 981×736 + 299px right padding.
+#   - 1280×736 = 942,080 px vs 640×640 = 409,600 px (2.3× more detail).
+#   - 1280 and 736 are both divisible by 32 (max backbone stride) → no FPN size mismatch.
+#     (720 is NOT divisible by 32: 720/32=22.5 → FPN upsample mismatch 22→44 vs 45.)
+#
+# Letterbox pipeline:
+#   Resize(size=736, max_size=1280)  — resize shorter edge → 736, cap longer at 1280
+#   PadToSize([1280, 736])           — right/bottom-pad to fill to exactly 1280×736
+#
+#   Result per group:
+#     1920×1080 (16:9): resize → 1280×720, pad bottom 16px → 1280×736
+#     1400×1050 (4:3):  resize → 981×736,  pad right 299px → 1280×736
+#
+# VRAM: 2.3× more pixels → batch_size=2 (safe on 8GB).
+#
+# Multi-scale jitter in collate is DISABLED. The collate does F.interpolate(images, size=sz)
+# with a single int → squares the letterboxed image. Fixed size from transforms instead.
+#
+# Run:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_1280.yml \
+#       --device cuda:0 --tuning output/dfine_hgnetv2_s_visdrone/best_stg1.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_1280
+exp_name: dfine_s_visdrone_1280
+use_wandb: True
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+# eval_spatial_size: [H, W] — pre-caches anchor positions for eval inference
+eval_spatial_size: [736, 1280]
+
+# LR: 2× the original fine-tuning LR (1e-4 global, 5e-5 backbone).
+# The resolution shift (640×640 → 1280×736) is as disruptive as a domain transfer —
+# the anchor grid restructures from 8400 to 19320 positions and all decoder spatial
+# attention patterns need significant re-adaptation. 3e-5 was too conservative and
+# caused stagnation at AP~0.11 for 10+ epochs. Cosine 1e-4 → 1e-6 over 50 epochs.
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00005
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00005
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 50
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+# 50 epochs total. Stop strong augmentation at epoch 40 (same 80% ratio as baseline).
+epochs: 50
+
+train_dataloader:
+  # AMP (use_amp: True set below) halves activation memory → allows batch=4.
+  # Without AMP: batch=2 used ~2.7GB. With AMP batch=4: estimate ~3–4GB, safe on 8GB.
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        # Letterbox resize: shorter edge → 736, cap longer at 1280 to preserve AR.
+        # 16:9 (e.g. 1920×1080): → 1280×720   4:3 (e.g. 1400×1050): → 981×736
+        - {type: Resize, size: 736, max_size: 1280, antialias: True}
+        # Pad right/bottom to exactly 1280×736. 16:9: 16px bottom; 4:3: 299px right.
+        - {type: PadToSize, size: [1280, 736]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: 40   # stop strong augmentation at epoch 40 (80% of 50)
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    # base_size_repeat: null → scales=None → multi-scale jitter never runs.
+    # stop_epoch must be > epochs (50) to prevent D-FINE's stage1→stage2 reload logic
+    # (det_solver.py:109) from firing and trying to load a non-existent best_stg1.pth.
+    # Setting it to 200 (well beyond 50) keeps all epochs in "stage 1" saving mode.
+    stop_epoch: 200
+    ema_restart_decay: 0.9999
+    base_size: 1280
+    base_size_repeat: ~
+
+use_amp: True  # mixed precision: fp16 activations → halved VRAM, allows batch=4
+
+val_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: 736, max_size: 1280, antialias: True}
+        - {type: PadToSize, size: [1280, 736]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

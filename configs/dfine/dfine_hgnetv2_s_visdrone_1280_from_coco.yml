@@ -1,0 +1,116 @@
+# D-FINE-S fine-tuned on VisDrone at 1280×736 starting from COCO pretrained weights.
+#
+# Previous attempt (dfine_hgnetv2_s_visdrone_1280.yml) started from best_stg1.pth
+# (VisDrone 640×640 checkpoint, AP=0.231). That run flatlined at AP≈0.125 for 43 epochs.
+# Root cause: the 640×640 VisDrone checkpoint had FDR distributions specialized for
+# 8,400 anchor positions. Switching to 19,320 positions at 1280×736 forced the model
+# to relearn the spatial grid while fighting entrenched 640×640 priors → no AP gain.
+#
+# Starting from COCO pretrained weights avoids this: no legacy resolution bias.
+# The model adapts to VisDrone domain AND 1280×736 grid simultaneously from a neutral
+# starting point (COCO features are resolution-agnostic at reasonable scales).
+#
+# Run:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_1280_from_coco.yml \
+#       --device cuda:0 --tuning weight/dfine_s_coco.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_1280_from_coco
+exp_name: dfine_s_visdrone_1280_from_coco
+use_wandb: True
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+# eval_spatial_size: [H, W] — pre-caches anchor positions for eval inference
+eval_spatial_size: [736, 1280]
+
+# LR: same as original VisDrone fine-tune from COCO (dfine_hgnetv2_s_visdrone.yml)
+# scaled up 2× for the resolution shift (same logic as the failed run, but from
+# a clean starting point the higher LR is safe — no entrenched distributions to fight).
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00005
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00005
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 50
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+epochs: 50
+
+train_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: 736, max_size: 1280, antialias: True}
+        - {type: PadToSize, size: [1280, 736]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: 40
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 200
+    ema_restart_decay: 0.9999
+    base_size: 1280
+    base_size_repeat: ~
+
+use_amp: True
+
+val_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: 736, max_size: 1280, antialias: True}
+        - {type: PadToSize, size: [1280, 736]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

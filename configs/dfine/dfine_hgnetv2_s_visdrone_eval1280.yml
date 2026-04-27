@@ -1,0 +1,54 @@
+# Eval-only config: 1280x1280 inference on ms1280_cont best checkpoint
+#
+# Tests whether eval at the max training resolution (1280px) beats the
+# default 1024px eval. Model was trained multi-scale [768-1280], so it has
+# seen 1280px inputs. This is purely an eval change — no retraining needed.
+#
+# Baseline: eval at 1024px → AP50:95 = 0.2966 (epoch 131)
+#
+# USAGE:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_eval1280.yml \
+#       --test-only --resume output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
+#       --device cuda:0
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/eval_1280
+exp_name: dfine_s_visdrone_eval1280
+use_wandb: False
+use_amp: True
+eval_spatial_size: [1280, 1280]
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+val_dataloader:
+  total_batch_size: 1
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1280, 1280]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

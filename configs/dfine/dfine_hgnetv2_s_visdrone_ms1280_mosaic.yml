@@ -1,0 +1,117 @@
+# D-FINE-S VisDrone — Combined augmentation retraining
+#
+# Builds on ms1280_cont (AP=0.2966, epoch 131) with two new augmentations:
+#   1. Mosaic4 — combines 4 images into a 2×2 grid; increases scene/object diversity
+#      per training step, especially useful for crowded aerial scenes.
+#   2. CopyPasteSmallObjects — already active, kept unchanged.
+#
+# Training schedule:
+#   Phase 1 (epochs 0–79):  full augmentation, multi-scale [768–1280], adaptive batch
+#   Phase 2 (epochs 80–95): no augmentation, fixed 1024px, EMA restart
+#     → stage 2 fires at stop_epoch=80 in the collate
+#
+# USAGE:
+#   python train.py \
+#     -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_mosaic.yml \
+#     --tuning output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
+#     --device cuda:0
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_ms1280_mosaic
+exp_name: dfine_s_visdrone_ms1280_mosaic
+use_wandb: True
+use_amp: True
+eval_spatial_size: [1024, 1024]  # square eval canvas — matches val Resize and scale_boxes convention
+accum_steps: 4
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 96
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 80           # cosine decays over phase 1 only; phase 2 runs at low LR
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 12
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  repeat_factor_threshold: 0.5
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1024, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 80
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 80
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+    batch_size_table_path: ~
+    mosaic_p: 0.5
+
+val_dataloader:
+  total_batch_size: 1
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

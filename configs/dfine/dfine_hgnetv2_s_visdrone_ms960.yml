@@ -1,0 +1,136 @@
+# D-FINE-S VisDrone — Multi-scale training centred on 960px
+#
+# WHY THIS EXPERIMENT:
+#   Experiment D showed 77% of training boxes are below the 16px feature floor
+#   at 640×640. At 960px this drops to 60.8% (-16.2pp). This is the highest
+#   resolution that fits 8GB VRAM at batch=2 with AMP.
+#
+#   KEY DIFFERENCE from all previous 960px attempts:
+#   - Previous attempts: converge at 640 first, THEN jump → collapse
+#   - This config: multi-scale [704, 1184] FROM THE COCO CHECKPOINT, so the
+#     model never locks into a single-scale regime during VisDrone fine-tuning
+#   - Dataset-level Resize is 960px (native → 960px letterbox), NOT upsampling
+#     from a 640px tensor. Objects get real higher-resolution pixels.
+#
+# MULTI-SCALE RANGE: [704, 1184]  (±25% around 960, all multiples of 32)
+#   generate_scales(960, 5) covers:
+#   [704, 736, 768, 800, 832, 864, 896, 928,
+#    960, 960, 960, 960, 960,
+#    1184, 1152, 1120, 1088, 1056, 1024, 992, 960]
+#   Batches at 640px also appear in range (via 704→640 or just below) ensuring
+#   continuity with COCO pretraining priors.
+#
+# VRAM estimate (RTX 4060 8GB):
+#   AIFI tokens at 960px:  30²=900   (2.25× vs 640)
+#   AIFI tokens at 1184px: 37²=1369  (3.42× vs 640)
+#   Attention memory at batch=2, max scale:
+#     2 × 1369² = 3.75M vs baseline 8 × 400² = 1.28M → 2.93× → "probably fine"
+#   AMP (fp16) halves activation memory throughout.
+#   If OOM at 1184px peaks, reduce batch to 1 or use gradient accumulation × 2.
+#
+# EXPECTED GAIN: +2–4 AP points → AP50:95 ~0.250–0.270
+#   -16.2pp sub-16px improvement drives this. Literature on UAV/VisDrone detectors
+#   reports 3–6% AP gain from 640→960px resolution with proper training.
+#   AP-small expected to improve most (+0.04–0.06 from 0.142 baseline).
+#
+# USAGE:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_ms960.yml \
+#       --device cuda:0 --tuning weight/dfine_s_coco.pth
+#
+# IF OOM: reduce total_batch_size to 1 and add gradient accumulation, or
+#   lower base_size to 800 (see dfine_hgnetv2_s_visdrone_ms800.yml)
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_ms960
+exp_name: dfine_s_visdrone_ms960
+use_wandb: True
+use_amp: True   # fp16: mandatory at this resolution on 8GB VRAM
+eval_spatial_size: [960, 960]  # match val_dataloader Resize; overrides base 640×640
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 80
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 80
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  # adaptive_batch=True: collate subsamples to n = max(1, batch × (base_size/sz)²)
+  # so pixel count per batch stays constant across scales.
+  # total_batch_size = what fits at base_size (960px) — collate handles the rest:
+  #   sz=704 → batch=4 (capped at DL max)   sz=960 → batch=2   sz=1184 → batch=1
+  total_batch_size: 2    # fits at 960px; auto-drops to 1 at 1184px peaks
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [960, 960]}   # native → 960px letterbox; real pixels, not upsampling
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 64
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 64
+    base_size: 960
+    base_size_repeat: 5
+    adaptive_batch: True   # auto-reduce batch at large scales
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 2
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [960, 960]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

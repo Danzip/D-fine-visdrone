@@ -1,0 +1,114 @@
+# D-FINE-S fine-tuned on VisDrone at 960×576 (letterboxed, aspect-ratio-preserving)
+#
+# Progressive resolution stage 1: 640×640 → 960×576
+# Starting point: output/dfine_hgnetv2_s_visdrone/best_stg1.pth (epoch 66, AP=0.231)
+#
+# Why 960×576?
+#   - Intermediate step before 1280×736. Anchor grid jump: 8,400 → 11,340 (+35%)
+#     vs 640→1280 which was 8,400 → 19,320 (+130%) — too large to adapt in 50 epochs.
+#   - 960/32=30 ✓, 576/32=18 ✓ — both divisible by max backbone stride.
+#   - Letterbox: 16:9 (1920×1080) → 960×540 + 36px bottom pad → 960×576
+#               4:3  (1400×1050) → 768×576 + 192px right pad → 960×576
+#
+# Strategy: run 10 epochs, check AP vs 0.231 baseline. If adapting, continue to 50.
+#
+# Run:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_960.yml \
+#       --device cuda:0 --tuning output/dfine_hgnetv2_s_visdrone/best_stg1.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_960
+exp_name: dfine_s_visdrone_960
+use_wandb: True
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+eval_spatial_size: [576, 960]
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00005
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00005
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 50
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+epochs: 50
+
+train_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: 576, max_size: 960, antialias: True}
+        - {type: PadToSize, size: [960, 576]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: 40
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 200
+    ema_restart_decay: 0.9999
+    base_size: 960
+    base_size_repeat: ~
+
+use_amp: True
+
+val_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: 576, max_size: 960, antialias: True}
+        - {type: PadToSize, size: [960, 576]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

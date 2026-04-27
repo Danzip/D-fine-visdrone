@@ -1,0 +1,102 @@
+# D-FINE-S VisDrone — Stage-1 continuation from ms1280 best_stg1.pth
+#
+# WHY: ms1280 was still climbing at epoch 63 (AP=0.250, +0.001/epoch).
+#   Stage 2 only had dead LR (~3e-6). This restarts stage 1 (multi-scale,
+#   fresh cosine LR) from the best checkpoint and runs until plateau.
+#
+# USAGE:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_cont.yml \
+#       --device cuda:0 --tuning output/dfine_hgnetv2_s_visdrone_ms1280/best_stg1.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_ms1280_cont
+exp_name: dfine_s_visdrone_ms1280_cont
+use_wandb: True
+use_amp: True
+eval_spatial_size: [1024, 1024]
+accum_steps: 4
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 500
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 500
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 2
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 9999      # never disable augmentation
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 9999     # never enter stage 2 — run until manual stop
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 1
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

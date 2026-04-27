@@ -1,0 +1,128 @@
+# D-FINE-S VisDrone — Multi-scale training centred on 1024px, peak 1280px
+#
+# WHY THIS EXPERIMENT:
+#   Experiment D showed sub-16px fraction drops from 77% → 52.3% at 1280×736.
+#   That is a 24.7pp gain — the largest jump of any feasible resolution.
+#   base_size=1024 gives scale range [768, 1280] via generate_scales(1024, 3).
+#
+# MULTI-SCALE RANGE: [768, 1280]  (±25% around 1024, all multiples of 32)
+#   generate_scales(1024, 3):
+#   [768, 800, 832, 864, 896, 928, 960, 992,
+#    1024, 1024, 1024,
+#    1280, 1248, 1216, 1184, 1152, 1120, 1088, 1056, 1024]
+#
+# VRAM: batch=1, accum_steps=4 → effective batch=4
+#   AIFI tokens at 1280px: 40²=1600 (4× vs 640)
+#   batch=1 attention cost: 1×1600² / (8×400²) = 2.0× baseline → fits 8GB
+#   batch=2 would be 4.0× → tight/OOM at 1280px peaks → use batch=1+accum instead
+#   AMP (fp16) mandatory.
+#
+# GRADIENT ACCUMULATION:
+#   accum_steps=4 makes effective batch=4 at memory cost of batch=1.
+#   optimizer.step() fires every 4 forward passes; loss is divided by 4 before backward.
+#   LR is kept the same as 960px config (effective batch matches).
+#
+# EXPECTED GAIN: +3–5 AP points → AP50:95 ~0.260–0.280
+#   Sub-16px drops 24.7pp at 1280px vs 640px baseline — the largest representable
+#   gain from resolution. Literature on VisDrone at this range: +3–8% AP.
+#   Run AFTER ms960 converges; use ms960 result as the bar to beat.
+#
+# USAGE (run after ms960 confirms convergence):
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280.yml \
+#       --device cuda:0 --tuning weight/dfine_s_coco.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_ms1280
+exp_name: dfine_s_visdrone_ms1280
+use_wandb: True
+use_amp: True    # mandatory at 1280px on 8GB
+eval_spatial_size: [1024, 1024]  # match val_dataloader Resize; overrides base 640×640
+accum_steps: 4   # effective batch = 1 × 4 = 4; optimizer steps every 4 forward passes
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 80
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 80
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  # adaptive_batch=True: collate auto-subsamples based on chosen scale.
+  # total_batch_size = what fits at base_size (1024px):
+  #   sz=768  → batch=2 (capped at DL max)   sz=1024 → batch=2   sz=1280 → batch=1
+  # accum_steps=4 gives effective batch=8 at 1024px, =4 at 1280px.
+  total_batch_size: 2
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}  # native → 1024px letterbox (centre of range)
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 64
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 64
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True   # at 1280px: drops batch 2→1 automatically
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 1
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

@@ -1,0 +1,117 @@
+# D-FINE-S VisDrone — Multi-scale training centred on 800px
+#
+# WHY THIS EXPERIMENT:
+#   Experiment D (analyze_box_sizes.py) showed that at 640×640, 77% of training
+#   boxes are below the 16px feature-representation floor. At 800px this drops to
+#   68.6% (-8.4pp). At 992px (the max scale in this range) it drops further.
+#   Native-image→800px letterbox gives the model real higher-resolution pixels,
+#   unlike collate-only upsampling from a 640px tensor.
+#
+# MULTI-SCALE RANGE: [576, 992]  (±25% around 800, all multiples of 32)
+#   generate_scales(800, 5) = [576, 608, 640, 672, 704, 736, 768,
+#                               800, 800, 800, 800, 800,
+#                               992, 960, 928, 896, 864, 832]
+#   Batch randomly picks one scale each iteration. Includes 640 for continuity
+#   with COCO pretraining, peaks at 992 for resolution gain.
+#
+# VRAM estimate (RTX 4060 8GB):
+#   AIFI tokens at 992px: 31²=961 vs 20²=400 at 640px (2.4× more)
+#   At batch=4: attention cost ~2.9× baseline (batch=8 at 640) → "probably fine"
+#   AMP (fp16) halves activation memory throughout.
+#
+# EXPECTED GAIN: +1.5–3 AP points → AP50:95 ~0.245–0.261
+#   Based on -8.4pp sub-16px improvement and VisDrone literature reporting
+#   2–5% AP gains from resolution increase in this range.
+#
+# USAGE:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_ms800.yml \
+#       --device cuda:0 --tuning weight/dfine_s_coco.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_ms800
+exp_name: dfine_s_visdrone_ms800
+use_wandb: True
+use_amp: True   # fp16: essential at this resolution to fit 8GB VRAM
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 80
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 80
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 4   # reduced from 8 — 800px needs more VRAM per image
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [800, 800]}   # native → 800px letterbox (was 640)
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 64        # stop strong augmentation 16 epochs before end
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 64       # stop multi-scale at same point as augmentation
+    base_size: 800       # multi-scale centre; range = [576, 992] via generate_scales
+    base_size_repeat: 5  # 5 draws at exactly 800; others distributed across [576, 992]
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [800, 800]}   # eval at same centre scale as training
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

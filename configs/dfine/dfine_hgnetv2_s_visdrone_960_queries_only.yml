@@ -1,0 +1,120 @@
+# D-FINE-S — query-only adaptation at 960×576
+#
+# Hypothesis: the content queries (tgt_embed, 300×256 = 76,800 params) are the only
+# part that needs to re-learn WHERE to look at the new resolution. Everything else
+# (backbone, encoder, FDR heads, decoder attention) retains VisDrone domain knowledge
+# and is frozen. This isolates the spatial re-adaptation problem to a single small tensor.
+#
+# Inspired by "prompt tuning" (Lester et al., 2021): freeze the full model, train only
+# the input embeddings that steer the frozen computation.
+#
+# tgt_embed IS loaded from best_stg1.pth (640×640 trained values). We keep the domain
+# knowledge in the query embeddings (what VisDrone objects look like) and let training
+# shift the spatial priors from 640×640 → 960×576 positions. The frozen backbone+encoder
+# provide stable 960×576 features; the queries just need to learn to route to them.
+#
+# Run:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_960_queries_only.yml \
+#       --device cuda:0 --tuning output/dfine_hgnetv2_s_visdrone/best_stg1.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_960_decoder_only
+exp_name: dfine_s_visdrone_960_decoder_only
+use_wandb: True
+
+# Freeze all params except tgt_embed (decoder content queries)
+freeze_except_decoder: True
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+eval_spatial_size: [576, 960]
+
+# Higher LR for the queries — they're starting from the wrong 640×640 initialization
+# and need to move quickly. Only 76,800 params are being updated.
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00005
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00005
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 50
+  eta_min: 0.00001
+  milestones: ~
+  gamma: ~
+
+epochs: 50
+
+train_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: 576, max_size: 960, antialias: True}
+        - {type: PadToSize, size: [960, 576]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: 40
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  collate_fn:
+    stop_epoch: 200
+    ema_restart_decay: 0.9999
+    base_size: 960
+    base_size_repeat: ~
+
+use_amp: True
+
+val_dataloader:
+  total_batch_size: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: 576, max_size: 960, antialias: True}
+        - {type: PadToSize, size: [960, 576]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

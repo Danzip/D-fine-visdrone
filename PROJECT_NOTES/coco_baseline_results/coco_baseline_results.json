@@ -1,0 +1,53 @@
+{
+  "model": "D-FINE-S",
+  "pretrained_on": "COCO2017",
+  "checkpoint": "weight/dfine_s_coco.pth",
+  "device": "cuda:0",
+  "sample_inference": [
+    {
+      "image": "000000001000.jpg",
+      "latency_ms": 758.84,
+      "n_detections": 20,
+      "saved_to": "sample_1_000000001000.jpg"
+    },
+    {
+      "image": "000000003501.jpg",
+      "latency_ms": 33.78,
+      "n_detections": 7,
+      "saved_to": "sample_2_000000003501.jpg"
+    },
+    {
+      "image": "000000007386.jpg",
+      "latency_ms": 35.5,
+      "n_detections": 3,
+      "saved_to": "sample_3_000000007386.jpg"
+    },
+    {
+      "image": "000000016228.jpg",
+      "latency_ms": 31.99,
+      "n_detections": 33,
+      "saved_to": "sample_4_000000016228.jpg"
+    },
+    {
+      "image": "000000020247.jpg",
+      "latency_ms": 38.87,
+      "n_detections": 2,
+      "saved_to": "sample_5_000000020247.jpg"
+    }
+  ],
+  "benchmark": {
+    "mean_ms": 24.1,
+    "std_ms": 3.24,
+    "p50_ms": 23.82,
+    "p95_ms": 28.97,
+    "fps": 41.5,
+    "n_warmup": 100,
+    "n_timed": 500,
+    "device": "cuda:0",
+    "input_size": [
+      640,
+      640
+    ]
+  },
+  "coco_eval_log": null
+}

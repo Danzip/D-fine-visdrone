@@ -1,0 +1,115 @@
+# D-FINE-S fine-tuned on VisDrone
+# Fine-tune from COCO pretrained: python train.py -c this_file -t weight/dfine_s_coco.pth --device cuda:0
+#
+# Key differences from COCO config:
+#   - num_classes: 10 (not 80)
+#   - remap_mscoco_category: False (VisDrone IDs are not COCO category IDs)
+#   - Lower learning rates: fine-tuning needs smaller steps to not overwrite pretrained features
+#   - Fewer epochs: domain transfer converges faster than training from scratch
+#   - Smaller batch size: single GPU (adjust if you have more VRAM)
+#   - use_wandb: True (enables our per-class visualisation callback)
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone
+exp_name: dfine_s_visdrone
+use_wandb: True  # WSL2 confirmed working 2026-03-25
+use_amp: True    # fp16 activations: halves VRAM, allows batch=8 on RTX 4060 8GB
+
+DFINE:
+  backbone: HGNetv2
+
+# HGNetV2 backbone — S model uses B0 variant
+# freeze_at: -1 means nothing is frozen (all layers trainable)
+# During fine-tuning we train the full network. The lower LR on backbone
+# (see optimizer section) effectively "soft-freezes" it — it learns slowly
+# so pretrained features are preserved while later layers adapt faster.
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+# S model: 3 decoder layers instead of 6
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+# Fine-tuning learning rates — why lower than COCO training?
+#
+# COCO training used lr=0.0002 (global), 0.0001 (backbone).
+# Fine-tuning starts from pretrained weights that already encode useful features.
+# If LR is too high, those features get overwritten ("catastrophic forgetting").
+# Rule of thumb for fine-tuning: use 5-10x lower LR than from-scratch.
+#
+# Strategy: backbone gets the lowest LR (slowest update) to preserve
+# pretrained low-level features. Encoder/decoder get medium LR to adapt
+# the feature fusion and detection heads to the new domain.
+#
+# backbone LR: 0.000025 (5x lower than original 0.0001)
+# global (encoder/decoder) LR: 0.00005 (4x lower than original 0.0002)
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# Cosine annealing over full 72 epochs — much better than MultiStepLR for fine-tuning.
+# The base config uses MultiStepLR with milestone=500, which never fires in 72 epochs
+# (LR stays flat the entire run). Cosine smoothly decays LR → eta_min over all epochs.
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 72        # matches epochs
+  eta_min: 0.000001  # final LR: 1e-6
+  milestones: ~    # null out base config's MultiStepLR milestones
+  gamma: ~         # null out base config's MultiStepLR gamma
+
+
+# Epochs: 72 total = 60 with full augmentation + 12 fine-grained EMA search
+# Why 72 not 132?
+#   - Fine-tuning converges faster than from-scratch (features already good)
+#   - More epochs risk overfitting on VisDrone (only 6k train images vs COCO's 118k)
+#   - The "12 extra" at the end (epochs 60-72) are D-FINE's EMA search phase:
+#     multi-scale augmentation is stopped, model focuses on precise localisation
+epochs: 72
+train_dataloader:
+  # Batch size 8 is safe for D-FINE-S on 8GB VRAM.
+  # Increase to 16 if memory allows (check with nvidia-smi during first epoch).
+  # Why not 32? That's the 4-GPU default. On 1 GPU: 32/4 = 8.
+  total_batch_size: 8
+  dataset:
+    transforms:
+      policy:
+        epoch: 60   # stop strong augmentation at epoch 60
+  collate_fn:
+    stop_epoch: 60  # stop multi-scale resize at epoch 60
+    ema_restart_decay: 0.9999
+    base_size_repeat: 20
+
+val_dataloader:
+  total_batch_size: 8  # val uses same batch size to avoid OOM

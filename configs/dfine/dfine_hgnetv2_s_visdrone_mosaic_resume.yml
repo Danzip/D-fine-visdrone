@@ -1,0 +1,128 @@
+# D-FINE-S VisDrone — Clean resume from W&B run l7dygiqx (AP=0.3027, epoch 15)
+#
+# CONFIRMED from W&B run l7dygiqx (danziv/D-FINE/l7dygiqx):
+#   - use_amp: false  (full float32 — that run's scaler was None)
+#   - batch_size: 2   (we override to 3 per user request)
+#   - adaptive_batch: True  (collate scales batch down at high res to prevent OOM)
+#   - accum_steps: 4  (effective batch = 8 orig / 12 with bs=3 override)
+#   - Mosaic: ON (p=0.5, output_size=1024) — confirmed in W&B transform ops
+#   - eval_spatial_size: [1024, 1024]  — square, confirmed
+#
+# Overrides vs original run:
+#   - total_batch_size: 3  (orig was 2; still safe — adaptive_batch keeps high-res to 1)
+#   - AR logic: NONE
+#
+# Smoke test 1 — fresh start, 20 steps, num_workers=0:
+#   cd D-FINE && source venv/bin/activate
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_mosaic_resume.yml \
+#     --device cuda:0 \
+#     -u train_dataloader.num_workers=0 max_train_steps=20
+#
+# Smoke test 2 — resume best checkpoint, 20 steps, num_workers=0:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_mosaic_resume.yml \
+#     --device cuda:0 \
+#     --resume output/dfine_hgnetv2_s_visdrone_ms1280_mosaic/best_stg1.pth \
+#     -u train_dataloader.num_workers=0 max_train_steps=20
+#
+# Full resume:
+#   python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_mosaic_resume.yml \
+#     --device cuda:0 \
+#     --resume output/dfine_hgnetv2_s_visdrone_ms1280_mosaic/best_stg1.pth
+
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/dfine_hgnetv2_s_visdrone_mosaic_resume
+exp_name: dfine_s_visdrone_mosaic_resume
+use_wandb: True
+use_amp: False
+eval_spatial_size: [1024, 1024]
+accum_steps: 4
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000025
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000025
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 96
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 80
+  eta_min: 0.000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 2
+  num_workers: 4
+  repeat_factor_threshold: 0.5
+  shuffle: true
+  drop_last: true
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1024, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 80
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 80
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 1
+  num_workers: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

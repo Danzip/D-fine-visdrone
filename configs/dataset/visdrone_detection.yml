@@ -1,0 +1,41 @@
+task: detection
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+# VisDrone has 10 classes (IDs 1-10, no gaps)
+num_classes: 10
+remap_mscoco_category: False  # VisDrone IDs are not COCO IDs — no remapping needed
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: dataset/visdrone/VisDrone2019-DET-train/images
+    ann_file: dataset/visdrone/annotations/instances_train.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  num_workers: 4
+  drop_last: True
+  collate_fn:
+    type: BatchImageCollateFunction
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: dataset/visdrone/VisDrone2019-DET-val/images
+    ann_file: dataset/visdrone/annotations/instances_val.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: False
+  num_workers: 4
+  drop_last: False
+  collate_fn:
+    type: BatchImageCollateFunction
