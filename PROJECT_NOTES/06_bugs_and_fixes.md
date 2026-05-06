@@ -4,6 +4,88 @@ All issues encountered during development, their root cause, and resolution stat
 
 ---
 
+## BUG-038 — Claude Code destroyed venv and lost dataset during branch transition (2026-05-06)
+
+**Status:** ⚠️ ONGOING — dataset being re-downloaded
+
+**What was supposed to happen:**
+Create `experiment/nwd-rewarm` branch from main, port the NWD-sqrt training files
+across, add `WarmupCosineHoldLR` scheduler, update config, launch. Should have been
+30 minutes of work.
+
+**What actually happened:**
+
+**Problem 1 — Venv destroyed (previous session):**
+The venv's `activate` script was missing (unknown cause). To restore it, ran
+`python3 -m venv /home/danziv/projects/DFine/D-FINE/venv --upgrade`, then
+`python3 -m venv /home/danziv/projects/DFine/D-FINE/venv`. This wiped all installed
+packages. Then force-reinstalled `torch==2.11.0+cu128` (wrong version — system has
+CUDA 12.4 not 12.8), which failed to load because nvidia CUDA runtime .so files were
+missing (the cu128 nvidia-* wheel packages are stub-only on this system).
+Fix: reinstall correct `torch==2.5.1+cu124`, then reinstall all missing deps
+(numpy, wandb, tensorboard, calflops, faster-coco-eval, loguru, matplotlib, etc.)
+one by one as import errors surfaced.
+**Time lost: ~2 hours.**
+
+**Problem 2 — src/ Python source files missing:**
+`src/` only had `__pycache__` (compiled .pyc files), no .py sources. This is because
+the git repo only tracks our modified files (`dfine_criterion.py`, `det_solver.py`, etc.)
+— the rest of D-FINE source is untracked and apparently was wiped at some point
+(possibly also during the venv recreation incident). Fixed by:
+`git checkout dfine-src -- src/`
+This restored all sources but also staged 50+ files we didn't want to commit.
+Had to manually reset staging and only re-add our files.
+
+**Problem 3 — train.py was empty (0 bytes):**
+Someone (unknown — possibly a bad `git checkout` in a previous session) overwrote
+`train.py` with an empty file. Fixed by: `git show dfine-src:train.py > train.py`.
+
+**Problem 4 — matcher.py lost NWD changes:**
+`git checkout dfine-src -- src/` overwrote `src/zoo/dfine/matcher.py` with the
+original no-NWD version. The NWD matcher changes were local, never committed.
+Had to rewrite NWD cost from scratch into the matcher.
+
+**Problem 5 — Dataset gone (this session):**
+P2 training ran on 2026-05-05 at 19:49 from `/home/danziv/projects/DFine/D-FINE`
+using `dataset/visdrone/`. By 2026-05-06, `dataset/` no longer exists anywhere on
+the filesystem. Root cause unknown. Nothing Claude Code did (path-specific git
+checkouts of `src/` and `configs/`) should touch untracked directories. Most likely
+hypothesis: disk cleanup / manual deletion between sessions, or WSL2 disk reclaim.
+Fix: re-downloading from ultralytics/assets GitHub releases (~30 min), re-running
+`tools/visdrone2coco.py` conversion.
+
+**Root cause of the overall disaster:**
+1. The repo tracks only a small subset of files — untracked files (dataset, base src,
+   train.py) are invisible to git and can be silently lost.
+2. Recreating a venv in-place with `python3 -m venv` wipes packages without warning.
+3. `git checkout <branch> -- <directory>` on a directory that contains both tracked
+   and untracked files only touches tracked files, but if the directory itself is not
+   tracked, the operation is a no-op that can mask the real problem.
+
+**Lessons / safeguards going forward:**
+- **Never run `python3 -m venv <existing_venv>`** — use `pip install` to fix packages.
+  If venv needs full recreation, `pip freeze > requirements.txt` first.
+- **Commit matcher.py and train.py** — they are modified and critical; not committing
+  them means any checkout can silently destroy the changes.
+- **Dataset path** — store dataset outside D-FINE (e.g., `/home/danziv/data/visdrone`)
+  and symlink in. A path outside the project dir is less likely to be caught by
+  accidental `rm -rf` or git operations.
+- **On git tasks**: Claude Code is safe for commits, diffs, branch creation, and
+  path-specific checkouts of tracked files. It is NOT safe to trust it with:
+  - Recreating environments in-place
+  - `git checkout <branch> -- <large_directory>` when only some files are tracked
+  - Any operation that could silently affect untracked files
+
+**Honest assessment for the user:**
+The venv destruction was Claude Code's fault (wrong tool used to fix missing activate
+script). The dataset loss cause is unknown — nothing in this session's git operations
+should have touched `dataset/`. The combination of an under-committed repo (most
+files untracked) and an environment recreation gone wrong created a fragile state
+that cascaded. The fix for future sessions is to commit more files and never recreate
+environments in-place.
+
+---
+
 ## BUG-001 — W&B service process fails to start on Windows
 
 **Status:** ⚠️ WORKAROUND (not fully fixed — fix planned via WSL2)
