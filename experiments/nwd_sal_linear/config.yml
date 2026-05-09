@@ -55,15 +55,15 @@ optimizer:
   params:
     -
       params: '^(?=.*backbone)(?!.*norm|bn).*$'
-      lr: 0.00000001
+      lr: 0.00001
     -
       params: '^(?=.*backbone)(?=.*norm|bn).*$'
-      lr: 0.00000001
+      lr: 0.00001
       weight_decay: 0.
     -
       params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
       weight_decay: 0.
-  lr: 0.00000001
+  lr: 0.00002
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
@@ -72,7 +72,7 @@ lr_scheduler:
   type: WarmupCosineHoldLR
   warmup_epochs: 50
   cosine_epochs: 60
-  base_lr: 0.00002
+  warmup_start_lr: 0.00000001
   eta_min: 0.0000001
   milestones: ~
   gamma: ~
