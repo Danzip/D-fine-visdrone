@@ -23,6 +23,9 @@
 | 16 | AR-aware rectangular training (Experiment C) | ❌ ABANDONED — pipeline built + tested; full training AP recovered only to 0.05 after 6 epochs from cont checkpoint (epoch 132+); too slow vs mosaic path; code left in repo but unused. See 12_ar_pipeline.md |
 | 17 | Clean mosaic resume (batch_size=4, AMP=True) | ✅ COMPLETE — **best AP=0.316** (best_stg2.pth, epoch 92, maxDets=500); post-peak plateau confirmed; stopped 2026-05-02 |
 | 18 | NWD + size-adaptive (sqrt) loss run | 🔄 IN PROGRESS — peak AP=0.3209 (ep109); 3 critical bugs fixed (BUG-036, BUG-037); restarted 2026-05-04 from best_stg2.pth |
+| 19 | Cloud training setup (RunPod) | ⏳ PENDING — AWS quota denied × 2, switching to RunPod RTX A5000 ($0.27/hr, 24GB) |
+| 20 | MSFD-style P2 fusion @ 640px + SAL(1/area) + NWD | ⏳ PLANNED — start from best_stg1.pth (AP=0.231); dual-convergence LR |
+| 21 | MSFD-style P2 fusion @ 1024px + SAL(1/area) + NWD | ⏳ PLANNED — start from best NWD-sqrt ckpt (AP=0.321); dual-convergence LR |
 | 13 | README + GitHub | ⏳ PENDING |
 
 ### Possible ablation (low priority, do after step 8–9 if time permits)

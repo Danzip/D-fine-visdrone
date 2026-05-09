@@ -1,0 +1,27 @@
+# D-FINE VisDrone training dependencies
+# torch, torchvision, torchaudio are pre-installed by RunPod — do NOT include here
+
+# Core eval
+pycocotools
+faster-coco-eval>=1.6.0
+
+# Config + logging
+PyYAML>=6.0
+loguru
+wandb
+tensorboard
+
+# Vision / data
+opencv-python-headless>=4.8.0
+Pillow>=10.0
+numpy>=1.24
+scipy
+
+# Utilities
+tqdm
+matplotlib
+pandas
+ensemble-boxes
+calflops
+GitPython
+psutil
