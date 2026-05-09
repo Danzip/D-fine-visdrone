@@ -14,10 +14,10 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 | Multi-scale training 1024px (80 ep) | 25.5% | 42.4% | 17.8% | - | 38 MB FP32 |
 | + Extended training (131 ep) | 29.7% | 47.9% | 20.8% | - | 38 MB FP32 |
 | + Mosaic + multi-scale retraining (160 ep) | 31.6% | 50.7% | 22.5% | - | 38 MB FP32 |
-| + NWD matching + size-adaptive loss (in progress, ep99/160) | **31.8%** | **50.4%** | **22.8%** | - | 38 MB FP32 |
+| + NWD matching + size-adaptive loss (ep109) | **32.1%** | **50.4%** | **23.0%** | - | 38 MB FP32 |
 | INT8 on Snapdragon 8 Gen 2 | - | - | - | **47 ms / 21 FPS** | **10 MB INT8** |
 
-SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **31.8%** (and climbing) with 10M params as a general-purpose detector fine-tuned on VisDrone - gap to same-size SOTA is ~3.8 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
+SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **32.1%** with 10M params as a general-purpose detector fine-tuned on VisDrone - gap to same-size SOTA is ~3.5 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
 
 ### Per-class AP - epoch-131 checkpoint (baseline for Mosaic+RFS retraining)
 
@@ -79,10 +79,10 @@ All experiments run on the epoch-131 checkpoint (AP=29.7%, 1024px eval). Multi-s
 
 ## Limitations
 
-- AP trails published VisDrone-specific SOTA (30.2% vs 35.6% DroneScan-YOLO) - gap is primarily architectural: purpose-built models add a P2 stride-4 detection head and NWD loss tuned for sub-16px objects; D-FINE-S uses a general-purpose FPN without aerial-specific modifications
+- AP trails published VisDrone-specific SOTA (32.1% vs 35.6% DroneScan-YOLO) - gap is primarily architectural: purpose-built models add a P2 stride-4 detection head and NWD loss tuned for sub-16px objects; D-FINE-S uses a general-purpose FPN without aerial-specific modifications
 - Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 21.1% (up from 14.2% at 640px, but still low - awning-tricycle and bicycle AP are well below the mean)
 - All inference-time tricks tested (SAHI, TTA, SWA, higher eval resolution) failed to improve over standard eval - the model's multi-scale training already internalizes what these try to add
-- Current best (31.8%, ep99/160) is still in training - NWD matching + sqrt size-adaptive loss run is climbing; next planned improvement is a P2 stride-4 detection head (architectural change, ~3–5h engineering)
+- Current best (32.1%, ep109) is NWD matching + sqrt size-adaptive loss; next experiments target MSFD-style P2 fusion and linear 1/area SAL to close the remaining ~3.5 AP gap to DroneScan-YOLO
 
 ---
 
@@ -266,7 +266,7 @@ The server loads both models at startup. `POST /detect` accepts `file` + `model`
 
 | Model | Params | AP50:95 | AP50 |
 |-------|--------|---------|------|
-| D-FINE-S (ours, current best) | 10M | 0.318 | 0.504 |
+| D-FINE-S (ours, current best) | 10M | 0.321 | 0.504 |
 | D-FINE-S (ours, pruned INT8) | 10M | 0.232 | 0.389 |
 | YOLOv8-X (mshamrai HuggingFace) | 68M | - | 0.470 |
 
