@@ -23,5 +23,6 @@ matplotlib
 pandas
 ensemble-boxes
 calflops
+transformers
 GitPython
 psutil
