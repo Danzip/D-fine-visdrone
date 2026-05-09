@@ -1,0 +1,116 @@
+# Experiment: NWD matcher + SAL linear (1/area)
+# Start: best_dfine_s_visdrone_nwd_sqrt_v2.pth (AP=0.321)
+# Change vs nwd_sal_sqrt: sal_mode='linear' (1/area instead of 1/sqrt(area))
+# Safe because warmup starts at 1e-8: effective LR on 4px box = 1e-8 * 625 = 6e-6
+
+__include__: [
+  '../../configs/dataset/visdrone_detection.yml',
+  '../../configs/runtime.yml',
+  '../../configs/dfine/include/dataloader.yml',
+  '../../configs/dfine/include/optimizer.yml',
+  '../../configs/dfine/include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/nwd_sal_linear
+exp_name: nwd_sal_linear
+use_wandb: True
+use_amp: True
+eval_spatial_size: [1024, 1024]
+accum_steps: 4
+num_top_queries: 500
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+DFINECriterion:
+  size_adaptive: True
+  sal_mode: 'linear'
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2, cost_nwd: 2}
+    nwd_constant: 0.5
+    alpha: 0.25
+    gamma: 2.0
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00000001
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00000001
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00000001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 110
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 50
+  cosine_epochs: 60
+  base_lr: 0.00002
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 4
+  num_workers: 4
+  repeat_factor_threshold: 0.5
+  shuffle: true
+  drop_last: true
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1024, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 80
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 80
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 1
+  num_workers: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1024, 1024]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

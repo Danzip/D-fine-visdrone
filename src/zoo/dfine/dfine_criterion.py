@@ -43,6 +43,7 @@ class DFINECriterion(nn.Module):
         boxes_weight_format=None,
         share_matched_indices=False,
         size_adaptive=False,
+        sal_mode='sqrt',
     ):
         """Create the criterion.
         Parameters:
@@ -52,6 +53,7 @@ class DFINECriterion(nn.Module):
             num_classes: number of object categories, omitting the special no-object category.
             reg_max (int): Max number of the discrete bins in D-FINE.
             boxes_weight_format: format for boxes weight (iou, ).
+            sal_mode: 'sqrt' for 1/sqrt(area) weighting, 'linear' for 1/area weighting.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -63,6 +65,7 @@ class DFINECriterion(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.size_adaptive = size_adaptive
+        self.sal_mode = sal_mode
         self.fgl_targets, self.fgl_targets_dn = None, None
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
@@ -134,12 +137,12 @@ class DFINECriterion(nn.Module):
         )
         loss_giou = loss_giou if boxes_weight is None else loss_giou * boxes_weight
 
-        # Size-adaptive weighting: sqrt(1/area) so tiny objects contribute more but label
-        # noise on sub-16px boxes isn't amplified explosively. 1/area was too aggressive
-        # (100x weight on 4px vs 40px objects) and chased annotation noise instead of signal.
         if self.size_adaptive and len(target_boxes) > 0:
             areas = target_boxes[:, 2] * target_boxes[:, 3]
-            size_w = 1.0 / (areas + 1e-6).sqrt()
+            if self.sal_mode == 'linear':
+                size_w = 1.0 / (areas + 1e-6)
+            else:
+                size_w = 1.0 / (areas + 1e-6).sqrt()
             size_w = size_w / size_w.mean().clamp(min=1e-6)
             loss_bbox = loss_bbox * size_w.unsqueeze(-1)
             loss_giou = loss_giou * size_w
@@ -191,7 +194,10 @@ class DFINECriterion(nn.Module):
 
             if self.size_adaptive and len(target_boxes) > 0:
                 areas = target_boxes[:, 2] * target_boxes[:, 3]
-                size_w = 1.0 / (areas + 1e-6).sqrt()
+                if self.sal_mode == 'linear':
+                    size_w = 1.0 / (areas + 1e-6)
+                else:
+                    size_w = 1.0 / (areas + 1e-6).sqrt()
                 size_w = size_w / size_w.mean().clamp(min=1e-6)
                 size_w_expanded = size_w.unsqueeze(1).expand(-1, 4).reshape(-1)
                 weight_targets = weight_targets * size_w_expanded.detach()
