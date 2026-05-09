@@ -1,9 +1,20 @@
-# Experiment: AR-aware batching + NWD matcher + SAL sqrt
+# Experiment: AR-aware rectangular training + NWD matcher + SAL sqrt
 # Start: best_dfine_s_visdrone_nwd_sqrt_v2.pth (AP=0.321)
-# Change vs nwd_sal_linear: sal_mode='sqrt' (proven), use_ar_sampler=True
-# AR sampler groups images by COCO metadata AR (16:9 vs 4:3) so each batch
-# contains only same-AR images. Images are still resized to 1024x1024 square —
-# no rectangular canvas — so the benefit is cleaner mosaic composition.
+#
+# Key idea: VisDrone is ~50% 16:9 and ~50% 4:3. Training on square 1024x1024
+# wastes pixels on letterbox bars and squishes objects. This experiment trains
+# each AR bucket at its canonical resolution:
+#   16:9 images → 736 x 1280 (h x w)
+#   4:3  images → 960 x 1280 (h x w)
+#
+# ARBucketBatchSampler ensures each batch contains only same-AR images.
+# ARLetterboxCollateFunction proportionally scales + center-pads to canvas.
+# No Mosaic or IoUCrop — both change AR unpredictably and would fight the sampler.
+# Eval on 736x1280 (val split is 100% 16:9).
+#
+# The original AR experiment (April 2026) failed at AP~0.05 due to wrong starting
+# point (AP=0.297). We now tune from AP=0.321 which should provide much better
+# gradient signal for the rectangular head to learn from.
 
 __include__: [
   '../../configs/dataset/visdrone_detection.yml',
@@ -18,7 +29,7 @@ exp_name: ar_aware
 tuning: ./output/best_dfine_s_visdrone_nwd_sqrt_v2.pth
 use_wandb: True
 use_amp: True
-eval_spatial_size: [1024, 1024]
+eval_spatial_size: [736, 1280]
 accum_steps: 4
 num_top_queries: 500
 
@@ -89,24 +100,16 @@ train_dataloader:
   dataset:
     transforms:
       ops:
-        - {type: Mosaic, output_size: 1024, p: 0.5}
         - {type: RandomPhotometricDistort, p: 0.5}
-        - {type: RandomIoUCrop, p: 0.8}
         - {type: SanitizeBoundingBoxes, min_size: 1}
         - {type: RandomHorizontalFlip}
-        - {type: Resize, size: [1024, 1024]}
-        - {type: SanitizeBoundingBoxes, min_size: 1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-      policy:
-        epoch: 80
-        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
   collate_fn:
-    stop_epoch: 80
-    base_size: 1024
-    base_size_repeat: 3
-    adaptive_batch: True
+    type: ARLetterboxCollateFunction
+    base_size: 1280
+    stop_epoch: 100000000
     ema_restart_decay: 0.9999
 
 val_dataloader:
@@ -115,5 +118,5 @@ val_dataloader:
   dataset:
     transforms:
       ops:
-        - {type: Resize, size: [1024, 1024]}
+        - {type: Resize, size: [736, 1280]}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}

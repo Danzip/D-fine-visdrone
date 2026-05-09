@@ -204,6 +204,78 @@ class DataLoader(data.DataLoader):
 
 
 @register()
+class ARLetterboxCollateFunction(BaseCollateFunction):
+    """Letterbox collate for AR-aware rectangular training.
+
+    Expects all images in a batch to come from the same AR bucket
+    (guaranteed by ARBucketBatchSampler). Proportionally scales each image
+    to fit the canonical canvas for its AR, then zero-pads to canvas size.
+    Box coordinates (normalized cxcywh) are adjusted to the padded canvas.
+
+    Canonical shapes at base_size=1280:
+      16:9 bucket (orig w/h > 1.6) → 736 × 1280 (h × w)
+      4:3  bucket (orig w/h ≤ 1.6) → 960 × 1280 (h × w)
+    """
+
+    def __init__(self, base_size: int = 1280, stop_epoch=None, ema_restart_decay: float = 0.9999):
+        super().__init__()
+        self.base_size = base_size
+        self.stop_epoch = stop_epoch if stop_epoch is not None else 100_000_000
+        self.ema_restart_decay = ema_restart_decay
+
+    @staticmethod
+    def _ceil32(x: float) -> int:
+        return math.ceil(x / 32) * 32
+
+    def _canvas(self, orig_w: int, orig_h: int) -> tuple:
+        sz = self.base_size
+        canvas_h = self._ceil32(sz * orig_h / orig_w)
+        canvas_w = sz
+        return canvas_h, canvas_w
+
+    def __call__(self, items):
+        images_raw = [x[0] for x in items]
+        targets = [x[1] for x in items]
+
+        # Canonical shape from COCO metadata orig_size = [W_orig, H_orig]
+        orig_size = targets[0].get("orig_size", None)
+        if orig_size is not None:
+            orig_w, orig_h = int(orig_size[0]), int(orig_size[1])
+        else:
+            _, h, w = images_raw[0].shape
+            orig_w, orig_h = w, h
+        canvas_h, canvas_w = self._canvas(orig_w, orig_h)
+
+        out_images = []
+        out_targets = []
+        for img, tgt in zip(images_raw, targets):
+            _, h, w = img.shape
+            scale = min(canvas_h / h, canvas_w / w)
+            new_h = round(scale * h)
+            new_w = round(scale * w)
+
+            img = F.interpolate(img.unsqueeze(0), size=(new_h, new_w),
+                                mode="bilinear", align_corners=False).squeeze(0)
+            pad_top = (canvas_h - new_h) // 2
+            pad_left = (canvas_w - new_w) // 2
+            img = F.pad(img, (pad_left, canvas_w - new_w - pad_left,
+                               pad_top, canvas_h - new_h - pad_top))
+            out_images.append(img.unsqueeze(0))
+
+            tgt = dict(tgt)
+            if "boxes" in tgt and len(tgt["boxes"]) > 0:
+                boxes = tgt["boxes"].clone()  # cxcywh normalized by current (w, h)
+                boxes[:, 0] = (boxes[:, 0] * new_w + pad_left) / canvas_w
+                boxes[:, 1] = (boxes[:, 1] * new_h + pad_top) / canvas_h
+                boxes[:, 2] = boxes[:, 2] * new_w / canvas_w
+                boxes[:, 3] = boxes[:, 3] * new_h / canvas_h
+                tgt["boxes"] = boxes
+            out_targets.append(tgt)
+
+        return torch.cat(out_images, dim=0), out_targets
+
+
+@register()
 def batch_image_collate_fn(items):
     """only batch image"""
     return torch.cat([x[0][None] for x in items], dim=0), [x[1] for x in items]
