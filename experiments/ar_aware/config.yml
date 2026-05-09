@@ -26,11 +26,11 @@ __include__: [
 
 output_dir: ./output/ar_aware
 exp_name: ar_aware
-tuning: ./output/best_dfine_s_visdrone_nwd_sqrt_v2.pth
+tuning: ./output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth
 use_wandb: True
 use_amp: True
 eval_spatial_size: [736, 1280]
-accum_steps: 8
+accum_steps: 16
 num_top_queries: 500
 
 DFINE:
@@ -92,7 +92,7 @@ lr_scheduler:
   gamma: ~
 
 train_dataloader:
-  total_batch_size: 4
+  total_batch_size: 2
   num_workers: 4
   use_ar_sampler: True
   shuffle: false

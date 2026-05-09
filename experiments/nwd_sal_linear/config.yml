@@ -13,7 +13,7 @@ __include__: [
 
 output_dir: ./output/nwd_sal_linear
 exp_name: nwd_sal_linear
-tuning: ./output/best_dfine_s_visdrone_nwd_sqrt_v2.pth
+tuning: ./output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth
 use_wandb: True
 use_amp: True
 eval_spatial_size: [1024, 1024]

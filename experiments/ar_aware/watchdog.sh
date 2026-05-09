@@ -12,7 +12,6 @@ RESUME_CKPT="output/ar_aware/last.pth"
 LOG="output/ar_aware/watchdog.log"
 RESTART_DELAY=15
 
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 mkdir -p output/ar_aware
 echo "=== Watchdog started at $(date) ===" | tee -a "$LOG"

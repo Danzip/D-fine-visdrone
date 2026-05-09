@@ -129,7 +129,7 @@ class ARBucketBatchSampler:
         rng.shuffle(all_batches)
 
         for batch in all_batches:
-            yield from batch
+            yield batch
 
     def __len__(self):
         bs = self.batch_size
@@ -203,6 +203,18 @@ class DataLoader(data.DataLoader):
         self._shuffle = shuffle
 
 
+class BaseCollateFunction(object):
+    def set_epoch(self, epoch):
+        self._epoch = epoch
+
+    @property
+    def epoch(self):
+        return self._epoch if hasattr(self, "_epoch") else -1
+
+    def __call__(self, items):
+        raise NotImplementedError("")
+
+
 @register()
 class ARLetterboxCollateFunction(BaseCollateFunction):
     """Letterbox collate for AR-aware rectangular training.
@@ -217,11 +229,12 @@ class ARLetterboxCollateFunction(BaseCollateFunction):
       4:3  bucket (orig w/h ≤ 1.6) → 960 × 1280 (h × w)
     """
 
-    def __init__(self, base_size: int = 1280, stop_epoch=None, ema_restart_decay: float = 0.9999):
+    def __init__(self, base_size: int = 1280, stop_epoch=None, ema_restart_decay: float = 0.9999, **kwargs):
         super().__init__()
         self.base_size = base_size
         self.stop_epoch = stop_epoch if stop_epoch is not None else 100_000_000
         self.ema_restart_decay = ema_restart_decay
+        self.scales = None  # no square multi-scale; det_solver checks this attribute
 
     @staticmethod
     def _ceil32(x: float) -> int:
@@ -279,18 +292,6 @@ class ARLetterboxCollateFunction(BaseCollateFunction):
 def batch_image_collate_fn(items):
     """only batch image"""
     return torch.cat([x[0][None] for x in items], dim=0), [x[1] for x in items]
-
-
-class BaseCollateFunction(object):
-    def set_epoch(self, epoch):
-        self._epoch = epoch
-
-    @property
-    def epoch(self):
-        return self._epoch if hasattr(self, "_epoch") else -1
-
-    def __call__(self, items):
-        raise NotImplementedError("")
 
 
 def generate_scales(base_size, base_size_repeat):
