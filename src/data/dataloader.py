@@ -77,27 +77,102 @@ def _build_rfs_sampler(dataset, threshold: float):
     return WeightedRandomSampler(weights, num_samples=num_samples, replacement=True)
 
 
+class ARBucketBatchSampler:
+    """Groups dataset images into 16:9 and 4:3 buckets by COCO metadata AR.
+
+    Yields same-AR batches so each batch contains images from only one AR bucket.
+    Batches alternate 16:9/4:3 with epoch-seeded shuffling within each bucket.
+    """
+
+    def __init__(self, dataset, batch_size: int):
+        coco = dataset.coco
+        img_ids = dataset.ids
+
+        self._16_9 = []
+        self._4_3 = []
+        for idx, img_id in enumerate(img_ids):
+            info = coco.imgs[img_id]
+            ar = info["width"] / info["height"]
+            if ar > 1.6:
+                self._16_9.append(idx)
+            else:
+                self._4_3.append(idx)
+
+        self.batch_size = batch_size
+        self._epoch = 0
+        print(f"[ARBucketBatchSampler] 16:9: {len(self._16_9)}  "
+              f"4:3: {len(self._4_3)}  batch_size={batch_size}")
+
+    def set_epoch(self, epoch: int):
+        self._epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(self._epoch)
+        bs = self.batch_size
+
+        a = self._16_9[:]
+        b = self._4_3[:]
+        rng.shuffle(a)
+        rng.shuffle(b)
+
+        # Full batches only (drop last incomplete)
+        batches_a = [a[i:i + bs] for i in range(0, (len(a) // bs) * bs, bs)]
+        batches_b = [b[i:i + bs] for i in range(0, (len(b) // bs) * bs, bs)]
+
+        # Interleave then shuffle so bucket order is unpredictable across epochs
+        all_batches = []
+        for i in range(max(len(batches_a), len(batches_b))):
+            if i < len(batches_a):
+                all_batches.append(batches_a[i])
+            if i < len(batches_b):
+                all_batches.append(batches_b[i])
+        rng.shuffle(all_batches)
+
+        for batch in all_batches:
+            yield from batch
+
+    def __len__(self):
+        bs = self.batch_size
+        return (len(self._16_9) // bs + len(self._4_3) // bs) * bs
+
+
 @register()
 class DataLoader(data.DataLoader):
     __inject__ = ["dataset", "collate_fn"]
 
     def __init__(self, dataset, collate_fn, shuffle=False,
-                 repeat_factor_threshold=None, **kwargs):
+                 repeat_factor_threshold=None, use_ar_sampler=False, **kwargs):
         sampler = None
+        self._ar_batch_sampler = None
 
-        if repeat_factor_threshold is not None and repeat_factor_threshold > 0:
-            sampler = _build_rfs_sampler(dataset, repeat_factor_threshold)
-            shuffle = False  # sampler and shuffle are mutually exclusive
+        if use_ar_sampler:
+            batch_size = kwargs.pop("batch_size", 1)
+            kwargs.pop("drop_last", None)  # batch_sampler owns drop behaviour
+            ar_bs = ARBucketBatchSampler(dataset, batch_size)
+            self._ar_batch_sampler = ar_bs
+            super().__init__(
+                dataset=dataset,
+                collate_fn=collate_fn,
+                batch_sampler=ar_bs,
+                **kwargs,
+            )
+        else:
+            if repeat_factor_threshold is not None and repeat_factor_threshold > 0:
+                sampler = _build_rfs_sampler(dataset, repeat_factor_threshold)
+                shuffle = False
 
-        super().__init__(
-            dataset=dataset,
-            collate_fn=collate_fn,
-            shuffle=shuffle,
-            sampler=sampler,
-            **kwargs,
-        )
+            super().__init__(
+                dataset=dataset,
+                collate_fn=collate_fn,
+                shuffle=shuffle,
+                sampler=sampler,
+                **kwargs,
+            )
+
         bs = self.batch_size
-        print(f"[DataLoader] effective batch_size={bs}  workers={self.num_workers}  sampler={type(sampler).__name__ if sampler else 'default'}")
+        sampler_name = (type(self._ar_batch_sampler).__name__ if self._ar_batch_sampler
+                        else type(sampler).__name__ if sampler else 'default')
+        print(f"[DataLoader] effective batch_size={bs}  workers={self.num_workers}  sampler={sampler_name}")
 
     def __repr__(self) -> str:
         format_string = self.__class__.__name__ + "("
@@ -111,6 +186,8 @@ class DataLoader(data.DataLoader):
         self._epoch = epoch
         self.dataset.set_epoch(epoch)
         self.collate_fn.set_epoch(epoch)
+        if self._ar_batch_sampler is not None:
+            self._ar_batch_sampler.set_epoch(epoch)
 
     @property
     def epoch(self):
