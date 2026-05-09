@@ -21,17 +21,20 @@ from pathlib import Path
 from PIL import Image
 
 CATEGORIES = [
-    {"id": 1,  "name": "pedestrian"},
-    {"id": 2,  "name": "people"},
-    {"id": 3,  "name": "bicycle"},
-    {"id": 4,  "name": "car"},
-    {"id": 5,  "name": "van"},
-    {"id": 6,  "name": "truck"},
-    {"id": 7,  "name": "tricycle"},
-    {"id": 8,  "name": "awning-tricycle"},
-    {"id": 9,  "name": "bus"},
-    {"id": 10, "name": "motor"},
+    {"id": 0,  "name": "pedestrian"},
+    {"id": 1,  "name": "people"},
+    {"id": 2,  "name": "bicycle"},
+    {"id": 3,  "name": "car"},
+    {"id": 4,  "name": "van"},
+    {"id": 5,  "name": "truck"},
+    {"id": 6,  "name": "tricycle"},
+    {"id": 7,  "name": "awning-tricycle"},
+    {"id": 8,  "name": "bus"},
+    {"id": 9,  "name": "motor"},
 ]
+
+# Map original VisDrone category IDs (1-10) to 0-indexed (0-9)
+VISDRONE_CAT_REMAP = {i: i - 1 for i in range(1, 11)}
 
 BASE = Path("dataset/visdrone")
 
@@ -73,7 +76,7 @@ def convert_split(split: str):
             annotations.append({
                 "id": ann_id,
                 "image_id": img_id,
-                "category_id": cat,
+                "category_id": VISDRONE_CAT_REMAP[cat],
                 "bbox": [x, y, bw, bh],
                 "area": float(bw * bh),
                 "iscrowd": 0,
