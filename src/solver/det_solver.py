@@ -129,7 +129,8 @@ class DetSolver(BaseSolver):
             if collate.scales is not None:
                 print(f"  scale range:      {min(collate.scales)}–{max(collate.scales)}  ({len(collate.scales)} steps)")
             print(f"  adaptive_batch:   {getattr(collate, 'adaptive_batch', False)}")
-            print(f"  AR batching:      DISABLED")
+            _ar = getattr(self.train_dataloader, '_ar_batch_sampler', None)
+            print(f"  AR batching:      {'ENABLED (' + type(_ar).__name__ + ')' if _ar else 'DISABLED'}")
             print(f"  batch_size:       {self.train_dataloader.batch_size}")
             print(f"  num_workers:      {self.train_dataloader.num_workers}")
             print(f"  accum_steps:      {args.yaml_cfg.get('accum_steps', 1)}")
