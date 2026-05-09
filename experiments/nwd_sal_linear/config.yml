@@ -79,7 +79,7 @@ lr_scheduler:
   gamma: ~
 
 train_dataloader:
-  total_batch_size: 12
+  total_batch_size: 8
   num_workers: 4
   repeat_factor_threshold: 0.5
   shuffle: true
