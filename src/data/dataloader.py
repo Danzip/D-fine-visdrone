@@ -133,7 +133,7 @@ class ARBucketBatchSampler:
 
     def __len__(self):
         bs = self.batch_size
-        return (len(self._16_9) // bs + len(self._4_3) // bs) * bs
+        return len(self._16_9) // bs + len(self._4_3) // bs
 
 
 @register()
