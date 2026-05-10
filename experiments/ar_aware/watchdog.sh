@@ -20,7 +20,7 @@ while true; do
     if [ -f "$RESUME_CKPT" ]; then
         echo "--- Resuming from $RESUME_CKPT at $(date) ---" | tee -a "$LOG"
         set +e
-        python train.py -c "$CONFIG" --resume "$RESUME_CKPT" --device cuda:0 2>&1 | tee -a "$LOG"
+        python train.py -c "$CONFIG" --resume "$RESUME_CKPT" -u "tuning=~" --device cuda:0 2>&1 | tee -a "$LOG"
         EXIT=$?
         set -e
     else
