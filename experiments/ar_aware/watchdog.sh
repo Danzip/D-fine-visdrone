@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CONFIG="experiments/ar_aware/config.yml"
+TUNING_CKPT="output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth"
 RESUME_CKPT="output/ar_aware/last.pth"
 LOG="output/ar_aware/watchdog.log"
 RESTART_DELAY=15
@@ -20,13 +21,13 @@ while true; do
     if [ -f "$RESUME_CKPT" ]; then
         echo "--- Resuming from $RESUME_CKPT at $(date) ---" | tee -a "$LOG"
         set +e
-        python train.py -c "$CONFIG" --resume "$RESUME_CKPT" -u "tuning=~" --device cuda:0 2>&1 | tee -a "$LOG"
+        python train.py -c "$CONFIG" --resume "$RESUME_CKPT" --device cuda:0 2>&1 | tee -a "$LOG"
         EXIT=$?
         set -e
     else
         echo "--- First run: tuning from checkpoint at $(date) ---" | tee -a "$LOG"
         set +e
-        python train.py -c "$CONFIG" --device cuda:0 2>&1 | tee -a "$LOG"
+        python train.py -c "$CONFIG" -t "$TUNING_CKPT" --device cuda:0 2>&1 | tee -a "$LOG"
         EXIT=$?
         set -e
     fi

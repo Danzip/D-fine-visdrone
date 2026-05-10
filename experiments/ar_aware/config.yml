@@ -26,7 +26,7 @@ __include__: [
 
 output_dir: ./output/ar_aware
 exp_name: ar_aware
-tuning: ./output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth
+tuning: ~
 use_wandb: True
 use_amp: True
 eval_spatial_size: [736, 1280]
