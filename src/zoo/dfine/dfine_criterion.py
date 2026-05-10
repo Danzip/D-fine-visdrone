@@ -459,6 +459,22 @@ class DFINECriterion(nn.Module):
                     l_dict = {k + "_dn_pre": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
+        # P2ConvHead loss (msfd_1024 experiment)
+        if "p2_logits" in outputs:
+            from .p2_conv_head import p2_head_loss
+            p2_losses = p2_head_loss(
+                outputs["p2_logits"],
+                outputs["p2_boxes"],
+                outputs["p2_anchors"],
+                targets,
+                num_classes=self.num_classes,
+                alpha=self.alpha,
+                gamma=self.gamma,
+            )
+            for k, v in p2_losses.items():
+                if k in self.weight_dict:
+                    losses[k] = v * self.weight_dict[k]
+
         # For debugging Objects365 pre-train.
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
         return losses

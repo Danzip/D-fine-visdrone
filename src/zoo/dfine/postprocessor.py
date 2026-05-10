@@ -38,6 +38,11 @@ class DFINEPostProcessor(nn.Module):
     def forward(self, outputs, orig_target_sizes: torch.Tensor):
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
 
+        # Merge P2ConvHead dense predictions (msfd_1024 experiment)
+        if "p2_logits" in outputs:
+            logits = torch.cat([logits, outputs["p2_logits"]], dim=1)
+            boxes  = torch.cat([boxes,  outputs["p2_boxes"]],  dim=1)
+
         bbox_pred = torchvision.ops.box_convert(boxes, in_fmt="cxcywh", out_fmt="xyxy")
         bbox_pred *= orig_target_sizes.repeat(1, 2).unsqueeze(1)
 
