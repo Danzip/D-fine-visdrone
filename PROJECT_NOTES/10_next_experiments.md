@@ -1,144 +1,109 @@
-# Next Experiments Plan (2026-05-09)
+# Next Experiments Plan (updated 2026-05-10)
 
-## Context
+## Current Best
 
-Current best: AP=0.321 from NWD-sqrt run (`best_dfine_s_visdrone_nwd_sqrt_v2.pth`).
-Cloud: moving to RunPod RTX A5000 (24GB VRAM, $0.27/hr). AWS quota denied twice.
-
----
-
-## Loss Understanding (clarified 2026-05-09)
-
-### What the NWD run introduced
-
-**1. NWD in Hungarian matcher** (`cost_nwd: 2`, `nwd_constant: 0.5`)
-- NOT a training loss — affects only the matching step
-- Converts boxes to 2D Gaussians N(cx, cy, w/2, h/2), computes Wasserstein distance
-- `nwd_cost = 1 - exp(-wasserstein / 0.5)`
-- For tiny boxes: size-relative matching cost → better assignment than GIoU alone
-- GIoU on a 4px box with 2px error ≈ 0 overlap → often unmatched; NWD handles this correctly
-
-**2. Size-adaptive loss weighting** (`size_adaptive: True`, sqrt version)
-- After matching: multiply L1 + GIoU + FGL losses by `1/sqrt(area)`, normalized to mean=1
-- Amplifies gradients for small objects (max 25× for 4px boxes vs large)
-- Linear `1/area` version (625× amplification) caused AP regression (BUG-035)
-- Sqrt is the compromise that works
-
-**3. maxDets=500 in eval** — eval fix only, not training
+AP=0.321 — `output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth`
+NWD matcher (cost_nwd=2, nwd_constant=0.5) + SAL sqrt (1/sqrt(area)).
 
 ---
 
-## Literature Findings (2026-05-09)
+## Running / Ready
 
-### DroneScan-YOLO (arXiv 2604.13278, Apr 2025) — ablation on VisDrone
-- SAL-NWD = Size-Adaptive Loss (1/area, linear) + NWD combined
-- SAL-NWD alone: **+9.8 AP50:95** over YOLOv8s baseline
-- MSFD (Multi-Scale Feature Distillation): **+10.3 AP50:95** — lightweight P2 detection head
-- RPA-Block: redundancy-aware filter pruning during training (dynamic, not structural)
-- All three combined: DroneScan-YOLO at AP=0.356 (current SOTA)
-
-### NWD as regression loss (IECA-YOLOv7 ablation)
-- NWD alone as regression loss: **+0.8 AP50:95** on drone detection benchmark
-- This is where the ~0.8 number the user recalled came from
-
-### HF-D-FINE (ScienceDirect, Nov 2025) — directly relevant
-- Uses D-FINE-S on VisDrone with "Outer-SNWD" loss: Shape-IoU + NWD + aspect ratio penalty
-- **+3.2 AP** over vanilla D-FINE-S on VisDrone
-- Confirms NWD as a regression loss term helps D-FINE specifically
-
-### Shape-IoU (arXiv 2312.17663)
-- Replaces CIoU's fixed aspect ratio penalty with scale-aware directional penalty
-- For a tall narrow box: penalizes height errors more than width errors
-- Generally better than CIoU for non-square objects and tiny objects
+| Exp | Status | Config | Notes |
+|-----|--------|--------|-------|
+| ar_aware | 🔄 RunPod ep63+ | experiments/ar_aware/ | Rectangular training, 736×1280 / 960×1280 |
+| p2_640 | ✅ Ready | experiments/p2_640/ | 4-level transformer at 640×640 |
+| msfd_1024 | ✅ Ready | experiments/msfd_1024/ | P2ConvHead (conv-only) at 1024×1024 |
 
 ---
 
-## Why Our P2 Branch Exploded VRAM
+## Experiment Design
 
-Our P2 branch added P2 as a full 4th level to the DFINETransformer:
-- P5 at 1024px: 32×32 = 1,024 positions
-- P4: 64×64 = 4,096 positions
-- P3: 128×128 = 16,384 positions
-- **P2: 256×256 = 65,536 positions (3× more than P3+P4+P5 combined)**
+### ar_aware
 
-MSDeformableAttention samples across ALL levels → 4× VRAM. The SFEM module
-itself (~100K params, depthwise) is negligible — the transformer is the problem.
+VisDrone is ≈50% 16:9 (1280×720–736) and ≈50% 4:3 (1400×1050, 2000×1500).
+Square 1024×1024 training wastes pixels on letterbox bars and compresses objects.
 
-## MSFD-Style Fix (Planned)
+Key idea: ARBucketBatchSampler groups images by AR into two buckets.
+ARLetterboxCollateFunction resizes each batch to its canonical canvas:
+- 16:9 → 736×1280 (h×w)
+- 4:3  → 960×1280 (h×w)
 
-Instead of adding P2 as a 4th transformer level:
-1. Extract P2 features (64ch stride-4) from backbone
-2. Apply lightweight depthwise separable convs + SE attention on P2
-3. Downsample P2 → P3 resolution and fuse into P3
-4. Transformer still sees [P3_enhanced, P4, P5] — same 3 levels, zero VRAM increase
+No Mosaic/IoUCrop (both destroy AR). Only PhotometricDistort + HFlip + CopyPaste.
 
-P2 small-object information flows through enriched P3. No transformer change needed.
-Estimated overhead: ~200K params, negligible VRAM.
+### p2_640 — standard DETR P2
 
----
+Adds backbone stage-0 (64ch, stride-4) as a 4th feature level to the full
+DFINETransformer. At 640×640, P2 = 160×160 = 25,600 tokens — manageable.
+Tests whether genuine P2 attention improves small-object detection.
 
-## Planned Experiments
+Config changes only (no new code):
+- `return_idx: [0,1,2,3]`
+- `HybridEncoder in_channels: [64,256,512,1024]`
+- `DFINETransformer num_levels: 4, feat_strides: [4,8,16,32]`
+- `num_points: [2,3,6,3]` — fewer points at P2
 
-### Experiment A: MSFD P2 @ 640×640 + SAL(1/area) + NWD matcher
-- **Start:** `best_stg1.pth` (AP=0.231, 640px simple augmentation)
-- **Why stg1:** smaller distribution shift for new P2 layers; stg1 trained without mosaic
-- **LR schedule:** dual-convergence (see below)
-- **Resolution:** 640×640 fixed
-- **Loss:** `1/area` size-adaptive (linear, not sqrt), NWD in matcher
+### msfd_1024 — YOLOv8-style lightweight P2
 
-### Experiment B: MSFD P2 @ 1024×1024 + SAL(1/area) + NWD matcher
-- **Start:** `best_dfine_s_visdrone_nwd_sqrt_v2.pth` (AP=0.321)
-- **Why this ckpt:** best weights available; already adapted to NWD matcher
-- **LR schedule:** dual-convergence (see below)
-- **Resolution:** 1024×1024 fixed
-- **Loss:** `1/area` size-adaptive (linear), NWD in matcher
+Keeps transformer at 3 levels (P3/P4/P5 at 1024px). P2 = 256×256 is handled
+by a lightweight conv head (no cross-attention, no 65K-token problem).
 
----
+P2ConvHead architecture:
+  DWBlock(256→128) → DWBlock(128→128)
+  ├── cls branch: DWBlock → Conv1×1 → [B, HW, num_classes]
+  └── reg branch: DWBlock → Conv1×1 → [B, HW, 4]  (normalized cxcywh)
 
-## Dual-Convergence LR Schedule (for P2 experiments)
+Loss (FCOS-style TAL):
+  For each GT box: all anchors with center inside box are candidates.
+  Best candidate = highest IoU with predicted box.
+  Loss: VFL (soft target = IoU) + L1 + GIoU for positives.
 
-Two param groups converge to the same LR over phase 1, then decay together:
-
-```
-Phase 1 (epochs 0–50):
-  Old weights (backbone + encoder + existing decoder):
-    1e-8 → 2e-5  (linear warmup, rising)
-  New P2 MSFD weights:
-    1e-4 → 2e-5  (cosine decay, falling)
-  Both land at 2e-5 at epoch 50.
-
-Phase 2 (epochs 50–110):
-  All weights together:
-    2e-5 → 1e-7  (cosine decay)
-```
-
-**Why small LR for old weights:** NWD matcher weights are strongly adapted;
-high LR would destroy that. Start at 1e-8 to protect them.
-
-**Why 1/area is safe here:** At LR=1e-8, even 625× amplification for a 4px box
-gives effective LR = 6e-6 — controlled. As LR warms slowly, model adapts to the
-1/area landscape before full amplification kicks in.
-
-**Why 1/area instead of sqrt:** DroneScan-YOLO uses 1/area and gains +9.8 AP.
-Our sqrt version only gained ~0.5 AP. The linear version exploded previously because
-of high starting LR (2.5e-5 × 625 = 0.016 effective LR → gradient chaos).
-Slow warmup from 1e-8 eliminates that risk.
+Postprocessor merges P2 predictions (65K positions) with transformer predictions
+(300 queries) before topk-500 NMS selection.
 
 ---
 
-## Checkpoints Summary
+## Why we dropped the Dual-Convergence LR schedule
+
+The `10_next_experiments.md` originally proposed a dual-convergence schedule:
+old weights warm up 1e-8→2e-5 while new P2 weights decay 1e-4→2e-5, meeting at ep50.
+
+Decision: keep it simple. Both p2_640 and msfd_1024 use the standard
+50-ep warmup + 60-ep cosine schedule. The new params (P2 projection + P2ConvHead)
+start with zero LR during warmup and gradually increase — the long warmup handles the
+new parameter initialization without special scheduling.
+
+If the new params fail to converge, the dual-convergence schedule can be revisited.
+
+---
+
+## Why 1/area (linear SAL) doesn't work
+
+nwd_sal_linear was killed at ep35 (AP 0.321 → 0.315).
+
+1/area amplifies a 4×4px box gradient by 625× vs a 64×64 box.
+Even with 50-ep warmup, this creates label-noise explosions on the tiniest boxes.
+sqrt(1/area) gives 25× amplification — validated and works.
+
+DroneScan-YOLO uses 1/area but starts with SAL applied only after 20 warmup epochs
+at LR<1e-5. Their regime is safer. Replicating it would need a custom lr/loss schedule.
+
+---
+
+## Checkpoints
 
 | File | AP | Description |
-|------|-----|-------------|
-| `output/dfine_hgnetv2_s_visdrone/best_stg1.pth` | 0.231 | 640px, 72 epochs |
-| `output/dfine_hgnetv2_s_visdrone_mosaic_resume/best_stg2.pth` | 0.316 | Mosaic 1024px, ep92 |
-| `output/dfine_hgnetv2_s_visdrone_nwd/best_dfine_s_visdrone_nwd_sqrt_v2.pth` | **0.321** | NWD+sqrt, best ever |
+|------|----|-------------|
+| output/dfine_hgnetv2_s_visdrone/best_stg1.pth | 0.231 | 640px baseline |
+| output/dfine_hgnetv2_s_visdrone_mosaic_resume/best_stg2.pth | 0.316 | Mosaic 1024px ep92 |
+| output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth | **0.321** | NWD+sqrt, current best |
+| output/ar_aware/last.pth | 0.316 (ep60) | ar_aware in progress |
 
 ---
 
-## Cloud Setup
+## Cloud
 
-- **Provider:** RunPod (runpod.io)
-- **GPU:** RTX A5000 (24GB VRAM, $0.27/hr)
-- **Cost estimate:** ~$7–10 total for both experiments sequentially
-- **AWS status:** quota denied twice (us-east-1), new request submitted (case 177831472500962, 6 vCPUs) — not worth pursuing further
+- Provider: RunPod
+- GPU: RTX A5000 (24GB VRAM, $0.27/hr) — confirmed working
+- Repo: github.com/Danzip/D-fine-visdrone (git pull before starting)
+- Dataset: /workspace/D-fine-visdrone/data/visdrone/ (pre-uploaded)

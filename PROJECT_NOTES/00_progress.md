@@ -22,10 +22,12 @@
 | 15 | Combined retraining: mosaic + class-balance + multi-res | ✅ COMPLETE — **AP=0.3027 at epoch 15** (W&B l7dygiqx); crashed ep16 (BUG-018); best_stg1.pth kept |
 | 16 | AR-aware rectangular training (Experiment C) | ❌ ABANDONED — pipeline built + tested; full training AP recovered only to 0.05 after 6 epochs from cont checkpoint (epoch 132+); too slow vs mosaic path; code left in repo but unused. See 12_ar_pipeline.md |
 | 17 | Clean mosaic resume (batch_size=4, AMP=True) | ✅ COMPLETE — **best AP=0.316** (best_stg2.pth, epoch 92, maxDets=500); post-peak plateau confirmed; stopped 2026-05-02 |
-| 18 | NWD + size-adaptive (sqrt) loss run | 🔄 IN PROGRESS — peak AP=0.3209 (ep109); 3 critical bugs fixed (BUG-036, BUG-037); restarted 2026-05-04 from best_stg2.pth |
-| 19 | Cloud training setup (RunPod) | ⏳ PENDING — AWS quota denied × 2, switching to RunPod RTX A5000 ($0.27/hr, 24GB) |
-| 20 | MSFD-style P2 fusion @ 640px + SAL(1/area) + NWD | ⏳ PLANNED — start from best_stg1.pth (AP=0.231); dual-convergence LR |
-| 21 | MSFD-style P2 fusion @ 1024px + SAL(1/area) + NWD | ⏳ PLANNED — start from best NWD-sqrt ckpt (AP=0.321); dual-convergence LR |
+| 18 | NWD + size-adaptive (sqrt) loss run | ✅ COMPLETE — **peak AP=0.3209** (ep109); bugs BUG-036/037 fixed; final best: `best_stg1_dfine_s_visdrone_nwd_sqrt.pth` (AP=0.321) |
+| 19 | Cloud training setup (RunPod) | ✅ COMPLETE — RunPod RTX A5000 ($0.27/hr, 24GB); AWS quota denied × 2 |
+| 20 | nwd_sal_linear — 1/area weighting | ❌ ABANDONED — killed ep35; AP regressed 0.321→0.315; 1/area too aggressive even with slow warmup |
+| 21 | ar_aware — rectangular AR-aware training | 🔄 IN PROGRESS — RunPod epoch 63+, AP=0.3158 at ep60; NWD+sqrt, 736×1280(16:9) / 960×1280(4:3), ARBucketBatchSampler |
+| 22 | p2_640 — 4-level D-FINE at 640×640 | ✅ READY — pure config; P2+P3+P4+P5 in full transformer; 34K tokens |
+| 23 | msfd_1024 — YOLOv8-style P2 conv head | ✅ READY — P2ConvHead (DWConv×2, FCOS TAL); transformer stays 3-level; P2 at 256×256 via conv only |
 | 13 | README + GitHub | ⏳ PENDING |
 
 ### Possible ablation (low priority, do after step 8–9 if time permits)
@@ -391,7 +393,7 @@ Gap is expected — model size difference. Next step is to close this gap.
 
 ---
 
-## Step 18 — NWD + Size-Adaptive Loss Run — IN PROGRESS (2026-05-02)
+## Step 18 — NWD + Size-Adaptive Loss Run — COMPLETE (2026-05-02 → 2026-05-09)
 
 **Goal:** Push AP above 0.316 baseline by making matching and loss more sensitive to small objects.
 
@@ -445,6 +447,68 @@ model weights) into both model copies; do NOT reset optimizer or scheduler.
 full restart from ep79, redoing all of stage 2 from scratch. The stop_epoch=80 EMA
 reset fired 4 separate times as a result. Fixed: `last.pth` now saved every epoch.
 
-**Restarted 2026-05-04** from best_stg2.pth (AP=0.3209, sched last_epoch=95, LR~9.5e-6).
-Training continues cosine descent toward eta_min=1e-7. Phase 2 (ep161-320) auto-triggers
-via watchdog after phase 1 completes, with eval@1024 vs eval@1280 comparison at boundary.
+**Restarted 2026-05-04** from best_stg2.pth. Ran to completion (110 epochs).
+
+**Final result: AP=0.321** — best checkpoint: `output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt.pth`
+
+---
+
+## Step 20 — nwd_sal_linear — ABANDONED (2026-05-09)
+
+Tried `sal_mode='linear'` (1/area weighting instead of 1/sqrt(area)).
+- Epoch 0: AP=0.321 (loaded from NWD-sqrt best)
+- Epoch 35: AP=0.315 — steady regression
+- Root cause: 1/area amplifies tiny-box gradients by 625× vs large boxes — too aggressive
+  even with 50-epoch warmup. The sqrt version is the right trade-off.
+- Killed. Config preserved at `experiments/nwd_sal_linear/`.
+
+---
+
+## Step 21 — ar_aware — IN PROGRESS (2026-05-10)
+
+**Goal:** Exploit VisDrone's bimodal AR distribution (≈50% 16:9, ≈50% 4:3) by training
+each batch at its canonical rectangular canvas instead of square 1024×1024.
+
+**Key components built:**
+- `ARBucketBatchSampler`: groups images by COCO metadata AR into 16:9 / 4:3 buckets;
+  yields same-AR batches; epoch-seeded shuffling (src/data/dataloader.py)
+- `ARLetterboxCollateFunction`: proportionally scales + center-pads to canonical canvas
+  (736×1280 for 16:9, 960×1280 for 4:3); adjusts normalized cxcywh boxes (same file)
+- No Mosaic or IoUCrop (both destroy AR); PhotometricDistort + HFlip + CopyPasteSmall only
+
+**Config:** `experiments/ar_aware/config.yml`
+- Tuning from `best_stg1_dfine_s_visdrone_nwd_sqrt.pth` (AP=0.321)
+- eval @ 736×1280 (val split is 100% 16:9)
+- NWD matcher + SAL sqrt, accum_steps=4, total_batch_size=8
+
+**Local training:** epoch 0→60, AP=0.3158 at ep60 (still in 50-ep warmup)
+**RunPod training:** resumed from local ep60 last.pth, currently epoch 63+
+
+**Bugs encountered:**
+- `ARBucketBatchSampler.__len__` returned image count not batch count → wrong progress bar (fixed)
+- `tuning=~` CLI override didn't reliably null YAML key → moved tuning to watchdog `-t` flag
+- W&B duplicate runs from stale `wandb_run_id.txt` on RunPod
+
+---
+
+## Steps 22–23 — p2_640 and msfd_1024 — READY (2026-05-10)
+
+Both experiments prepared and verified; ready to launch.
+
+### p2_640 (`experiments/p2_640/`)
+- 4-level D-FINE: P2+P3+P4+P5 all in full MSDeformableAttention transformer
+- 640×640 input → P2 = 160×160 = 25,600 tokens (manageable)
+- `return_idx: [0,1,2,3]`, `in_channels: [64,256,512,1024]`, `num_levels: 4`
+- `num_points: [2,3,6,3]` — fewer points at P2 to limit compute
+- Same training pipeline as nwd_sal_sqrt baseline
+
+### msfd_1024 (`experiments/msfd_1024/`)
+- YOLOv8-style: transformer stays at 3 levels (P3/P4/P5); P2 handled by conv head only
+- 1024×1024 input → P2 = 256×256, processed by `P2ConvHead` (2 DWConv blocks)
+- FCOS-style TAL assignment: anchor center inside GT → highest IoU candidate wins
+- VFL + L1 + GIoU loss for P2ConvHead predictions
+- P2 predictions merged with decoder predictions at NMS (postprocessor)
+- Transformer cost unchanged vs baseline
+
+**New code:** `src/zoo/dfine/p2_conv_head.py` (P2ConvHead + p2_head_loss)
+Minimal changes to: dfine.py, dfine_criterion.py, postprocessor.py, __init__.py
