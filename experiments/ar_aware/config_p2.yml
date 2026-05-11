@@ -1,0 +1,109 @@
+# Experiment: AR-aware phase 2 — 200-epoch extension at fixed 1e-7
+# Resumes from ar_aware epoch 110 (AP=?? — check W&B)
+# WarmupCosineHoldLR holds at eta_min=1e-7 after epoch 110 — no scheduler changes needed.
+
+__include__: [
+  '../../configs/dataset/visdrone_detection.yml',
+  '../../configs/runtime.yml',
+  '../../configs/dfine/include/dataloader.yml',
+  '../../configs/dfine/include/optimizer.yml',
+  '../../configs/dfine/include/dfine_hgnetv2.yml',
+]
+
+output_dir: ./output/ar_aware_p2
+exp_name: ar_aware_p2
+tuning: ~
+resume: ./output/ar_aware/last.pth   # replace with pod's epoch-110 checkpoint path
+use_wandb: True
+use_amp: True
+eval_spatial_size: [736, 1280]
+accum_steps: 4
+num_top_queries: 500
+
+DFINE:
+  backbone: HGNetv2
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+DFINETransformer:
+  num_layers: 3
+  eval_idx: -1
+
+HybridEncoder:
+  in_channels: [256, 512, 1024]
+  hidden_dim: 256
+  depth_mult: 0.34
+  expansion: 0.5
+
+DFINECriterion:
+  size_adaptive: True
+  sal_mode: 'sqrt'
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2, cost_nwd: 2}
+    nwd_constant: 0.5
+    alpha: 0.25
+    gamma: 2.0
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00001
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00001
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00002
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epochs: 310
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 50
+  cosine_epochs: 60
+  warmup_start_lr: 0.00000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 8
+  num_workers: 4
+  use_ar_sampler: True
+  shuffle: false
+  drop_last: true
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+  collate_fn:
+    type: ARLetterboxCollateFunction
+    base_size: 1280
+    stop_epoch: 100000000
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  total_batch_size: 1
+  num_workers: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [736, 1280]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
