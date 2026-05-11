@@ -12,7 +12,6 @@ from torch.cuda.amp.grad_scaler import GradScaler
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.tensorboard import SummaryWriter
 
 __all__ = [
     "BaseConfig",
@@ -42,7 +41,7 @@ class BaseConfig(object):
         self._val_dataset: Dataset = None
         self._collate_fn: Callable = None
         self._evaluator: Callable[[nn.Module, DataLoader, str],] = None
-        self._writer: SummaryWriter = None
+        self._writer = None
 
         # dataset
         self.num_workers: int = 0
@@ -278,8 +277,9 @@ class BaseConfig(object):
         self._evaluator = fn
 
     @property
-    def writer(self) -> SummaryWriter:
+    def writer(self):
         if self._writer is None:
+            from torch.utils.tensorboard import SummaryWriter
             if self.summary_dir:
                 self._writer = SummaryWriter(self.summary_dir)
             elif self.output_dir:
@@ -288,7 +288,6 @@ class BaseConfig(object):
 
     @writer.setter
     def writer(self, m):
-        assert isinstance(m, SummaryWriter), f"{type(m)} must be SummaryWriter"
         self._writer = m
 
     def __repr__(self):
