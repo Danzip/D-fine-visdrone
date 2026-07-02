@@ -44,6 +44,8 @@ class DFINECriterion(nn.Module):
         share_matched_indices=False,
         size_adaptive=False,
         sal_mode='sqrt',
+        use_nwd_loss=False,
+        nwd_loss_constant=0.5,
     ):
         """Create the criterion.
         Parameters:
@@ -66,6 +68,8 @@ class DFINECriterion(nn.Module):
         self.gamma = gamma
         self.size_adaptive = size_adaptive
         self.sal_mode = sal_mode
+        self.use_nwd_loss = use_nwd_loss
+        self.nwd_loss_constant = nwd_loss_constant
         self.fgl_targets, self.fgl_targets_dn = None, None
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
@@ -149,6 +153,20 @@ class DFINECriterion(nn.Module):
 
         losses["loss_bbox"] = loss_bbox.sum() / num_boxes
         losses["loss_giou"] = loss_giou.sum() / num_boxes
+
+        # R2: NWD regression loss — size-relative by construction (same Gaussian
+        # formulation as the matcher's cost_nwd), so SAL weighting is NOT applied
+        # to it (that would double-count the small-object emphasis).
+        if self.use_nwd_loss and len(target_boxes) > 0:
+            src_g = torch.stack(
+                [src_boxes[:, 0], src_boxes[:, 1], src_boxes[:, 2] / 2, src_boxes[:, 3] / 2], dim=-1
+            )
+            tgt_g = torch.stack(
+                [target_boxes[:, 0], target_boxes[:, 1], target_boxes[:, 2] / 2, target_boxes[:, 3] / 2], dim=-1
+            )
+            wasserstein = (src_g - tgt_g).pow(2).sum(-1).sqrt()
+            loss_nwd = 1.0 - torch.exp(-wasserstein / self.nwd_loss_constant)
+            losses["loss_nwd"] = loss_nwd.sum() / num_boxes
 
         return losses
 

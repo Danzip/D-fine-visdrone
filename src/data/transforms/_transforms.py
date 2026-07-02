@@ -340,12 +340,20 @@ class CopyPasteSmallObjects:
         p: float = 0.5,
         ioa_thresh: float = 0.30,
         max_attempts: int = 10,
+        rare_labels: list = None,
+        rare_boost: float = 3.0,
+        scale_jitter: list = None,
     ) -> None:
         self.max_size = max_size
         self.num_paste = num_paste
         self.p = p
         self.ioa_thresh = ioa_thresh
         self.max_attempts = max_attempts
+        # R3: rare-class targeting — rare_labels get rare_boost× sampling weight;
+        # scale_jitter=[lo, hi] resizes each crop by a random factor before pasting.
+        self.rare_labels = set(rare_labels) if rare_labels else None
+        self.rare_boost = rare_boost
+        self.scale_jitter = tuple(scale_jitter) if scale_jitter else None
 
     @staticmethod
     def _max_ioa(candidate: torch.Tensor, existing: torch.Tensor) -> float:
@@ -394,7 +402,15 @@ class CopyPasteSmallObjects:
         image = image.clone()  # avoid modifying the original tensor in-place
 
         n_paste = min(self.num_paste, len(small_idx))
-        chosen = small_idx[torch.randperm(len(small_idx))[:n_paste]]
+        if self.rare_labels is not None:
+            weights = torch.tensor(
+                [self.rare_boost if int(labels[i]) in self.rare_labels else 1.0
+                 for i in small_idx],
+                dtype=torch.float32,
+            )
+            chosen = small_idx[torch.multinomial(weights, n_paste, replacement=False)]
+        else:
+            chosen = small_idx[torch.randperm(len(small_idx))[:n_paste]]
 
         # Running list of all boxes (original + newly pasted) used for IoA checks
         all_boxes_list = boxes.tolist()
@@ -416,6 +432,19 @@ class CopyPasteSmallObjects:
             # Optional horizontal flip (50%)
             if torch.rand(1).item() < 0.5:
                 crop = crop.flip(-1)
+
+            # R3: random scale jitter (kept within image bounds, min 2px)
+            if self.scale_jitter is not None:
+                lo, hi = self.scale_jitter
+                s = lo + (hi - lo) * torch.rand(1).item()
+                nh = max(2, min(H - 1, int(round(oh * s))))
+                nw = max(2, min(W - 1, int(round(ow * s))))
+                if (nh, nw) != (oh, ow):
+                    crop = torch.nn.functional.interpolate(
+                        crop.unsqueeze(0), size=(nh, nw),
+                        mode="bilinear", align_corners=False,
+                    ).squeeze(0)
+                    oh, ow = nh, nw
 
             # Find a non-overlapping paste location
             placed = False

@@ -66,6 +66,8 @@ DFINETransformer:
 DFINECriterion:
   size_adaptive: True
   sal_mode: 'sqrt'
+  use_nwd_loss: True        # R2: additive NWD regression loss (size-relative)
+  nwd_loss_constant: 0.5
 
   matcher:
     type: HungarianMatcher
@@ -75,7 +77,7 @@ DFINECriterion:
     gamma: 2.0
 
   # P2ConvHead loss weights (separate from transformer decoder losses)
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5,
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_nwd: 2, loss_fgl: 0.15, loss_ddf: 1.5,
                 loss_p2_cls: 1.0, loss_p2_reg: 5.0, loss_p2_iou: 2.0}
 
 optimizer:
@@ -122,7 +124,9 @@ train_dataloader:
         - {type: Resize, size: [1024, 1024]}
         - {type: SanitizeBoundingBoxes, min_size: 1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
-        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5}
+        # R3: rare-class targeting (2=bicycle 6=tricycle 7=awning-tricycle) + scale jitter
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5,
+           rare_labels: [2, 6, 7], rare_boost: 3.0, scale_jitter: [0.7, 1.4]}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy:
         epoch: 80
