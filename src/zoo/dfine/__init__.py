@@ -8,5 +8,5 @@ from .dfine_criterion import DFINECriterion
 from .dfine_decoder import DFINETransformer
 from .hybrid_encoder import HybridEncoder
 from .matcher import HungarianMatcher
-from .p2_conv_head import P2ConvHead
+from .p2_conv_head import P2ConvHead, P2FusionLite
 from .postprocessor import DFINEPostProcessor

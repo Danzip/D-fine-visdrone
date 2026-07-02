@@ -35,9 +35,15 @@ DFINE:
   encoder: HybridEncoder
   decoder: DFINETransformer
   p2_head: P2ConvHead
+  p2_fusion: P2FusionLite    # cheap-FPN: raw P2 + upsampled neck-P3 (~+3% FLOPs)
+
+P2FusionLite:
+  p2_channels: 64       # raw backbone stage-0
+  p3_channels: 256      # HybridEncoder hidden_dim (neck P3)
+  out_channels: 128
 
 P2ConvHead:
-  in_channels: 256      # HybridEncoder hidden_dim
+  in_channels: 128      # P2FusionLite out_channels
   hidden_dim: 128
   num_classes: 10       # VisDrone
 
@@ -49,10 +55,10 @@ HGNetv2:
   use_lab: True
 
 HybridEncoder:
-  in_channels: [64, 256, 512, 1024]
-  feat_strides: [4, 8, 16, 32]
+  in_channels: [256, 512, 1024]   # 3-level (P3/P4/P5) — P2 bypasses the neck
+  feat_strides: [8, 16, 32]
   hidden_dim: 256
-  use_encoder_idx: [3]         # AIFI on P5 only (index 3 in 4-level list)
+  use_encoder_idx: [2]            # AIFI on P5 (index 2 in 3-level list)
   depth_mult: 0.34
   expansion: 0.5
 

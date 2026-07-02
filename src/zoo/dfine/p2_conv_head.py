@@ -45,6 +45,30 @@ class _DWBlock(nn.Module):
 
 
 @register()
+class P2FusionLite(nn.Module):
+    """Cheap-FPN fusion for P2: raw backbone P2 (edges/texture) + upsampled
+    neck-P3 (semantics). ~1-2 GFLOPs at 1024px vs ~77G for routing P2 through
+    the full CCFF. Channel-project both to out_channels, add, one DWBlock.
+    """
+
+    def __init__(self, p2_channels: int = 64, p3_channels: int = 256, out_channels: int = 128):
+        super().__init__()
+        self.p2_proj = nn.Sequential(
+            nn.Conv2d(p2_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        self.p3_proj = nn.Sequential(
+            nn.Conv2d(p3_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        self.fuse = _DWBlock(out_channels, out_channels)
+
+    def forward(self, p2: torch.Tensor, p3: torch.Tensor) -> torch.Tensor:
+        p3_up = F.interpolate(self.p3_proj(p3), size=p2.shape[-2:], mode="nearest")
+        return self.fuse(self.p2_proj(p2) + p3_up)
+
+
+@register()
 class P2ConvHead(nn.Module):
     """Lightweight YOLOv8-style detection head for P2 neck features.
 
