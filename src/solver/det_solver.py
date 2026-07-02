@@ -88,8 +88,14 @@ class DetSolver(BaseSolver):
             except Exception as e:
                 print(f"[WandbViz] Could not initialise visualizer: {e}")
 
-        n_parameters, model_stats = stats(self.cfg)
-        print(model_stats)
+        # BUG-043: stats() (calflops) crashes on the msfd 4-feat/3-level encoder
+        # split at profile time — profiling is cosmetic, never fatal.
+        try:
+            n_parameters, model_stats = stats(self.cfg)
+            print(model_stats)
+        except Exception as e:
+            n_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            print(f"[stats] profiler failed ({type(e).__name__}: {e}) — continuing; params={n_parameters}")
         print("-" * 42 + "Start training" + "-" * 43)
         top1 = 0
         best_stat = {
