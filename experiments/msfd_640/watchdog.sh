@@ -1,19 +1,21 @@
 #!/bin/bash
-# Watchdog for msfd_1024 experiment.
+# Watchdog for msfd_640 experiment.
 # First run: tunes from checkpoint (resets optimizer).
 # Subsequent restarts: resumes from last.pth.
-# Usage: bash experiments/msfd_1024/watchdog.sh
+# Usage: bash experiments/msfd_640/watchdog.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-CONFIG="experiments/msfd_1024/config.yml"
+export PYTHONUNBUFFERED=1
+
+CONFIG="experiments/msfd_640/config.yml"
 TUNING_CKPT="output/dfine_hgnetv2_s_visdrone_nwd/best_stg1_dfine_s_visdrone_nwd_sqrt_v2.pth"
-RESUME_CKPT="output/msfd_1024/last.pth"
-LOG="output/msfd_1024/watchdog.log"
+RESUME_CKPT="output/msfd_640/last.pth"
+LOG="output/msfd_640/watchdog.log"
 RESTART_DELAY=15
 
-mkdir -p output/msfd_1024
+mkdir -p output/msfd_640
 echo "=== Watchdog started at $(date) ===" | tee -a "$LOG"
 
 while true; do
