@@ -2,15 +2,23 @@
 
 Replaces MSDeformableAttention at the finest feature level with two stacked
 depthwise-separable conv blocks followed by separate cls/reg branches.
-Uses FCOS-style "center-inside" assignment: each anchor whose center falls
-inside a GT box is a candidate positive; among candidates for each GT, the
-one with highest predicted IoU is selected.
+
+Box decoding: cx/cy are anchor-relative offsets in CELL units
+(YOLO-style (sigmoid*2-0.5)/grid + anchor), so every anchor predicts within
+±0.5 cells of its own center. w/h use plain sigmoid with bias init at ~2% of
+image (median VisDrone box size).
+
+Assignment: top-K (K=10) candidates per GT — all inside-anchor candidates ranked by
+predicted IoU, top-10 each get a soft cls target equal to their IoU with the GT.
+Gives 10x more gradient per GT than top-1 at init when IoU is near-zero everywhere.
 
 Output keys added to the model output dict:
   p2_logits  : [B, H*W, num_classes]   raw cls logits (no sigmoid)
-  p2_boxes   : [B, H*W, 4]             normalized cxcywh in (0, 1)
+  p2_boxes   : [B, H*W, 4]             normalized cxcywh, anchor-decoded
   p2_anchors : [H*W, 2]                normalized anchor center (cx, cy)
 """
+
+import math
 
 import torch
 import torch.nn as nn
@@ -18,6 +26,8 @@ import torch.nn.functional as F
 
 from ...core import register
 from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+
+_TOP_K = 10
 
 
 class _DWBlock(nn.Module):
@@ -74,11 +84,22 @@ class P2ConvHead(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-        # Bias init for cls head: prior prob = 0.01 → logit = -log((1-p)/p)
+        # FIX-2: correct log-odds bias for cls head (prior=0.01 → logit≈-4.6)
         prior = 0.01
-        bias_val = -((1 - prior) / prior) ** 0.5  # approximately log-odds
+        bias_val = math.log(prior / (1.0 - prior))
         if hasattr(self.cls_branch[-1], "bias") and self.cls_branch[-1].bias is not None:
             nn.init.constant_(self.cls_branch[-1].bias, bias_val)
+        # FIX-5: zero-init the final cls conv weight.
+        # kaiming_normal_(fan_out=10) gives weight std≈0.45 → output std≈5.0 (128 inputs).
+        # sigmoid(N(-4.6, 5.0)) > 0.5 for ~18% of 256K predictions, flooding postprocessor
+        # top-K with random FPs and giving AP=0 throughout the 50-epoch warmup.
+        nn.init.zeros_(self.cls_branch[-1].weight)
+        # BUG-039 companion: init w/h bias so initial predictions are ~2% of image
+        # (median VisDrone box) instead of sigmoid(0)=50% of image. Keeps initial
+        # L1 in a sane range and lets IoU-based top-K assignment rank candidates
+        # meaningfully from the first iterations.
+        with torch.no_grad():
+            self.reg_branch[-1].bias[2:].fill_(math.log(0.02 / 0.98))
 
     def forward(self, p2_feat: torch.Tensor):
         """
@@ -86,7 +107,7 @@ class P2ConvHead(nn.Module):
             p2_feat: [B, in_channels, H, W]  P2 neck feature map (stride 4).
         Returns:
             cls_logits:    [B, H*W, num_classes]
-            pred_boxes:    [B, H*W, 4]  normalized cxcywh
+            pred_boxes:    [B, H*W, 4]  normalized cxcywh, anchor-decoded
             anchor_points: [H*W, 2]     normalized cell centers (cx, cy)
         """
         B, _, H, W = p2_feat.shape
@@ -103,12 +124,21 @@ class P2ConvHead(nn.Module):
         )
         anchor_points = torch.stack(
             [(gx + 0.5) / W, (gy + 0.5) / H], dim=-1
-        ).reshape(-1, 2)  # [H*W, 2]
+        ).reshape(-1, 2)  # [HW, 2]  (cx, cy)
 
-        # Decode boxes: cx/cy = sigmoid(reg) constrained to neighbour cells,
-        # w/h = sigmoid(reg) — tiny-object friendly since they rarely exceed 0.5.
         reg = reg.flatten(2).permute(0, 2, 1)    # [B, HW, 4]
-        pred_boxes = torch.sigmoid(reg)            # [B, HW, 4]  all in (0, 1)
+
+        # FIX-1 + BUG-039: anchor-relative decoding so each cell predicts near its
+        # own center. The offset must be in CELL units (divide by grid size) —
+        # without the division it spans ±0.5 of the whole image (~±80 cells),
+        # which made tiny-box regression unstable (loss_p2_reg ~43 in msfd_640).
+        # cx/cy range: anchor ± 0.5 cells (matches YOLO).
+        cx = (torch.sigmoid(reg[..., 0]) * 2 - 0.5) / W + anchor_points[:, 0]
+        cy = (torch.sigmoid(reg[..., 1]) * 2 - 0.5) / H + anchor_points[:, 1]
+        wh = torch.sigmoid(reg[..., 2:])          # (0, 1) — fine for tiny objects
+        pred_boxes = torch.clamp(
+            torch.cat([cx.unsqueeze(-1), cy.unsqueeze(-1), wh], dim=-1), 0.0, 1.0
+        )  # [B, HW, 4]
 
         cls_logits = cls.flatten(2).permute(0, 2, 1)  # [B, HW, C]
 
@@ -127,20 +157,16 @@ def p2_head_loss(
     num_classes: int,
     alpha: float = 0.25,
     gamma: float = 2.0,
-    w_cls: float = 1.0,
-    w_reg: float = 5.0,
-    w_iou: float = 2.0,
 ) -> dict:
-    """FCOS-style TAL loss for P2 dense predictions.
+    """Top-K TAL loss for P2 dense predictions.
 
     Assignment: for each GT box, all anchor points whose center falls inside
-    the GT are candidates; the candidate with the highest predicted IoU
-    (clamped to [0,1]) is selected as the single positive for that GT.
-    Remaining candidate anchors get a soft target equal to their predicted IoU.
+    the GT are candidates; the top-K (K=10) by predicted IoU each become a
+    positive, receiving a soft cls target equal to their IoU with the GT.
 
     Args:
         pred_logits:   [B, N, C]   raw cls logits
-        pred_boxes:    [B, N, 4]   normalized cxcywh
+        pred_boxes:    [B, N, 4]   normalized cxcywh (anchor-decoded)
         anchor_points: [N, 2]      normalized (cx, cy)
         targets:       list[dict]  with 'labels' [M] and 'boxes' [M,4] cxcywh
         num_classes:   int
@@ -150,9 +176,10 @@ def p2_head_loss(
     device = pred_logits.device
     B, N, C = pred_logits.shape
 
-    loss_cls_total = pred_logits.new_zeros(1)
-    loss_reg_total = pred_logits.new_zeros(1)
-    loss_iou_total = pred_logits.new_zeros(1)
+    # fp32 accumulators — AMP runs BCE in fp16, summing 256K terms overflows fp16 max (65504)
+    loss_cls_total = pred_logits.new_zeros(1, dtype=torch.float32)
+    loss_reg_total = pred_logits.new_zeros(1, dtype=torch.float32)
+    loss_iou_total = pred_logits.new_zeros(1, dtype=torch.float32)
     num_pos_total = 0
 
     ax = anchor_points[:, 0]  # [N]
@@ -166,11 +193,10 @@ def p2_head_loss(
         pred_b = pred_boxes[i]    # [N, 4]
         pred_l = pred_logits[i]   # [N, C]
 
-        # --- classification target (all-negative baseline) ---
         tgt_cls = torch.zeros(N, C, device=device)
 
         if M > 0:
-            gcx = gt_boxes[:, 0]  # [M]
+            gcx = gt_boxes[:, 0]
             gcy = gt_boxes[:, 1]
             gw  = gt_boxes[:, 2]
             gh  = gt_boxes[:, 3]
@@ -184,54 +210,62 @@ def p2_head_loss(
             )  # [N, M]
 
             if inside.any():
-                # IoU between every anchor's predicted box and every GT
-                pred_xyxy = box_cxcywh_to_xyxy(pred_b)          # [N, 4]
-                gt_xyxy   = box_cxcywh_to_xyxy(gt_boxes)        # [M, 4]
-                iou_mat, _ = box_iou(pred_xyxy, gt_xyxy)        # [N, M]
+                pred_xyxy = box_cxcywh_to_xyxy(pred_b)    # [N, 4]
+                gt_xyxy   = box_cxcywh_to_xyxy(gt_boxes)  # [M, 4]
+                iou_mat, _ = box_iou(pred_xyxy, gt_xyxy)  # [N, M]
 
-                # Masked IoU: only inside anchors are candidates
-                iou_inside = iou_mat * inside.float()            # [N, M]
+                # FIX-3: top-K assignment — iterate over GTs (M small, typically <100)
+                for m in range(M):
+                    cand_idx = inside[:, m].nonzero(as_tuple=True)[0]  # inside anchors
+                    if cand_idx.numel() == 0:
+                        continue
 
-                # For each GT, pick the single best anchor (highest IoU inside)
-                best_anchor_per_gt = iou_inside.argmax(dim=0)   # [M]
-                best_iou_per_gt = iou_inside.max(dim=0).values  # [M]
+                    cand_iou = iou_mat[cand_idx, m]  # IoU of each candidate with GT m
 
-                # Build pos mask: selected (anchor, GT) pairs with IoU > 0
-                valid_gt = best_iou_per_gt > 0                   # [M]
-                pos_anchors = best_anchor_per_gt[valid_gt]       # [K]
-                pos_gt_idx  = torch.where(valid_gt)[0]           # [K]
-                pos_iou     = best_iou_per_gt[valid_gt]          # [K]
+                    k = min(_TOP_K, cand_idx.numel())
+                    topk_iou, topk_local = cand_iou.topk(k)
+                    pos_anchors = cand_idx[topk_local]  # [k]
 
-                K = pos_anchors.shape[0]
-                if K > 0:
-                    num_pos_total += K
+                    valid = topk_iou > 0
+                    if not valid.any():
+                        continue
 
-                    # Soft cls target: IoU at positive positions
-                    gt_cls_labels = gt_labels[pos_gt_idx]         # [K]
-                    tgt_cls[pos_anchors, gt_cls_labels] = pos_iou.detach()
+                    pos_anchors = pos_anchors[valid]
+                    pos_iou     = topk_iou[valid]
+                    num_pos_total += pos_anchors.numel()
 
-                    # Regression loss on positive anchors
-                    pos_pred  = pred_b[pos_anchors]               # [K, 4]
-                    pos_gt    = gt_boxes[pos_gt_idx]              # [K, 4]
+                    # Soft cls target: take max in case two GTs share an anchor
+                    cls_col = gt_labels[m].item()
+                    tgt_cls[pos_anchors, cls_col] = torch.maximum(
+                        tgt_cls[pos_anchors, cls_col], pos_iou.detach()
+                    )
 
-                    loss_reg_total = loss_reg_total + F.l1_loss(pos_pred, pos_gt, reduction="sum")
+                    # Regression losses on positive anchors
+                    pos_pred = pred_b[pos_anchors]                         # [k, 4]
+                    pos_gt   = gt_boxes[m].unsqueeze(0).expand_as(pos_pred)  # [k, 4]
 
-                    pos_pred_xyxy = box_cxcywh_to_xyxy(pos_pred)
-                    pos_gt_xyxy   = box_cxcywh_to_xyxy(pos_gt)
-                    giou = generalized_box_iou(pos_pred_xyxy, pos_gt_xyxy)  # [K, K]
-                    loss_iou_total = loss_iou_total + (1 - giou.diagonal()).sum()
+                    loss_reg_total = loss_reg_total + F.l1_loss(
+                        pos_pred, pos_gt, reduction="sum"
+                    ).float()
 
-        # Varifocal cls loss: L = |q - σ(p)|^γ * BCE(p, q)
-        # q = tgt_cls (0 for bg, IoU for fg), p = pred_l
-        p_sig = pred_l.sigmoid()                                   # [N, C]
-        q     = tgt_cls                                            # [N, C]
+                    giou = generalized_box_iou(
+                        box_cxcywh_to_xyxy(pos_pred), box_cxcywh_to_xyxy(pos_gt)
+                    )
+                    loss_iou_total = loss_iou_total + (1 - giou.diagonal()).float().sum()
+
+        # Varifocal cls loss: w = q for positives, alpha*p^gamma for negatives
+        p_sig = pred_l.sigmoid()
+        q     = tgt_cls
         bce   = F.binary_cross_entropy_with_logits(pred_l, q, reduction="none")
         vfl_w = torch.where(q > 0, q, alpha * p_sig.pow(gamma))
-        loss_cls_total = loss_cls_total + (vfl_w * bce).sum()
+        loss_cls_total = loss_cls_total + (vfl_w * bce).float().sum()
 
+    # BUG-038: return UNSCALED losses (as the docstring always said) — the
+    # criterion multiplies by weight_dict. The old internal w_cls/w_reg/w_iou
+    # scaling stacked with weight_dict, making reg effectively 25× and iou 4×.
     denom = max(num_pos_total, 1)
     return {
-        "loss_p2_cls": w_cls * loss_cls_total / (N * B),
-        "loss_p2_reg": w_reg * loss_reg_total / denom,
-        "loss_p2_iou": w_iou * loss_iou_total / denom,
+        "loss_p2_cls": loss_cls_total / (N * B),
+        "loss_p2_reg": loss_reg_total / denom,
+        "loss_p2_iou": loss_iou_total / denom,
     }

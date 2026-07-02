@@ -1309,3 +1309,54 @@ Rationale: model is already at AP=0.320 and climbing; low-risk continuation like
 Warm restart run: LR bump to 3e-5, cosine decay to 1e-7 over 160 ep, starting from the
 best phase-2 checkpoint. Based on SGDR evidence, the adapted landscape should absorb the
 LR spike without the 80-epoch stall we saw in phase 1.
+
+---
+
+## BUG-038 — P2 head losses double-weighted (2026-07-02)
+
+**Symptom:** `loss_p2_reg: 43.7` in msfd_640 W&B logs while every decoder loss term
+sat at 0.5–1.0; P2 gradients flooded the shared backbone through raw stage-0 features.
+
+**Root cause:** `p2_head_loss()` scaled its returns internally (w_cls=1, w_reg=5,
+w_iou=2 defaults) even though its docstring said "(unscaled)", and
+`dfine_criterion.py` then multiplied by `weight_dict` (1/5/2) again.
+Effective weights: cls 1×, reg **25×**, iou **4×**.
+
+**Fix:** removed the internal scaling and the w_* params from `p2_head_loss`;
+`weight_dict` in the config is now the single source of loss weights.
+File: `src/zoo/dfine/p2_conv_head.py`.
+
+---
+
+## BUG-039 — P2 anchor decode image-relative, not cell-relative (2026-07-02)
+
+**Symptom:** unstable tiny-box regression; contributed to the huge loss_p2_reg.
+
+**Root cause:** decode was `sigmoid(reg)*2-0.5 + anchor` with `anchor` in
+normalized image coords — the offset spans ±0.5 of the WHOLE image (±80 cells on
+a 160×160 grid). The FIX-1 comment claimed "±0.5 cells" (YOLO divides the offset
+by grid size); the code didn't.
+
+**Fix:** offsets now divided by grid dims: `(sigmoid*2-0.5)/W + anchor_x` →
+true ±0.5-cell range. Companion fix: final reg conv w/h bias initialized to
+logit(0.02) so initial predictions are ~2% of image (median VisDrone box)
+instead of sigmoid(0)=50% — sane initial L1 and meaningful IoU-based top-K
+assignment from step 0. File: `src/zoo/dfine/p2_conv_head.py`.
+
+---
+
+## BUG-040 — logger ZeroDivisionError kills run on aborted epoch (2026-07-02)
+
+**Symptom:** msfd_1024 crashed with `ZeroDivisionError: float division by zero`
+in `SmoothedValue.global_avg` (`src/misc/logger.py:62`).
+
+**Root cause:** `global_avg = total / count` with count=0 — fires whenever an
+epoch aborts before any batch is logged, masking the original error and
+confusing the watchdog into restart loops (14 W&B restarts on 2026-07-01).
+
+**Fix:** `total / max(count, 1)`. File: `src/misc/logger.py`.
+
+**Still open (tracked in 11_ablation_study_runpod.md W2.3):** msfd_640 evaluated
+AP=0.0 at epochs 1–2 despite tuning from the AP=0.322 checkpoint — root cause
+not yet identified (BUG-038/039 are suspects via backbone corruption; eval-path
+P2 merge is the alternative). The E1 smoke test gates on epoch-0 AP ≥ 0.30.

@@ -59,7 +59,9 @@ class SmoothedValue(object):
 
     @property
     def global_avg(self):
-        return self.total / self.count
+        # BUG-040: guard against division by zero when an epoch aborts before
+        # any batch is logged (crashed msfd_1024 with ZeroDivisionError)
+        return self.total / max(self.count, 1)
 
     @property
     def max(self):

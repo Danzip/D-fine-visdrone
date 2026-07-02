@@ -25,7 +25,7 @@
 | 18 | NWD + size-adaptive (sqrt) loss run | ✅ COMPLETE — **peak AP=0.3209** (ep109); bugs BUG-036/037 fixed; final best: `best_stg1_dfine_s_visdrone_nwd_sqrt.pth` (AP=0.321) |
 | 19 | Cloud training setup (RunPod) | ✅ COMPLETE — RunPod RTX A5000 ($0.27/hr, 24GB); AWS quota denied × 2 |
 | 20 | nwd_sal_linear — 1/area weighting | ❌ ABANDONED — killed ep35; AP regressed 0.321→0.315; 1/area too aggressive even with slow warmup |
-| 21 | ar_aware — rectangular AR-aware training | 🔄 IN PROGRESS — RunPod epoch 63+, AP=0.3158 at ep60; NWD+sqrt, 736×1280(16:9) / 960×1280(4:3), ARBucketBatchSampler |
+| 21 | ar_aware — rectangular AR-aware training | ✅ COMPLETE — final AP=0.318 (ep110, ar_aware_p2 0.3181); never beat the 0.321 starting checkpoint. Post-mortem in 11_ablation_study_runpod.md (W-AR) |
 | 22 | p2_640 — 4-level D-FINE at 640×640 | ✅ READY — pure config; P2+P3+P4+P5 in full transformer; 34K tokens |
 | 23 | msfd_1024 — YOLOv8-style P2 conv head | ✅ READY — P2ConvHead (DWConv×2, FCOS TAL); transformer stays 3-level; P2 at 256×256 via conv only |
 | 13 | README + GitHub | ⏳ PENDING |
