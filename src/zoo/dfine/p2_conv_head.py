@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...core import register
-from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, box_iou
 
 _TOP_K = 10
 
@@ -149,6 +149,26 @@ class P2ConvHead(nn.Module):
 # Loss helpers
 # ---------------------------------------------------------------------------
 
+def _elementwise_giou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """GIoU of paired boxes (xyxy): boxes1[i] vs boxes2[i] → [P].
+
+    generalized_box_iou builds the full P×P matrix — prohibitive when P is
+    thousands of positives; only the diagonal is needed.
+    """
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    lt = torch.max(boxes1[:, :2], boxes2[:, :2])
+    rb = torch.min(boxes1[:, 2:], boxes2[:, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[:, 0] * wh[:, 1]
+    union = area1 + area2 - inter
+    iou = inter / union.clamp(min=1e-9)
+    lt_c = torch.min(boxes1[:, :2], boxes2[:, :2])
+    rb_c = torch.max(boxes1[:, 2:], boxes2[:, 2:])
+    wh_c = (rb_c - lt_c).clamp(min=0)
+    area_c = (wh_c[:, 0] * wh_c[:, 1]).clamp(min=1e-9)
+    return iou - (area_c - union) / area_c
+
 def p2_head_loss(
     pred_logits: torch.Tensor,
     pred_boxes: torch.Tensor,
@@ -214,44 +234,38 @@ def p2_head_loss(
                 gt_xyxy   = box_cxcywh_to_xyxy(gt_boxes)  # [M, 4]
                 iou_mat, _ = box_iou(pred_xyxy, gt_xyxy)  # [N, M]
 
-                # FIX-3: top-K assignment — iterate over GTs (M small, typically <100)
-                for m in range(M):
-                    cand_idx = inside[:, m].nonzero(as_tuple=True)[0]  # inside anchors
-                    if cand_idx.numel() == 0:
-                        continue
+                # FIX-3 (vectorized): top-K assignment for ALL GTs at once.
+                # The old per-GT python loop with .item() syncs took minutes on
+                # dense VisDrone images (M up to ~900) — see BUG-041.
+                cand_iou = torch.where(inside, iou_mat, iou_mat.new_zeros(()))
+                k = min(_TOP_K, N)
+                topk_iou, topk_idx = cand_iou.topk(k, dim=0)   # [k, M]
+                valid = topk_iou > 0                            # [k, M]
 
-                    cand_iou = iou_mat[cand_idx, m]  # IoU of each candidate with GT m
-
-                    k = min(_TOP_K, cand_idx.numel())
-                    topk_iou, topk_local = cand_iou.topk(k)
-                    pos_anchors = cand_idx[topk_local]  # [k]
-
-                    valid = topk_iou > 0
-                    if not valid.any():
-                        continue
-
-                    pos_anchors = pos_anchors[valid]
-                    pos_iou     = topk_iou[valid]
+                if valid.any():
+                    pos_anchors = topk_idx[valid]                       # [P]
+                    pos_gt_idx  = valid.nonzero(as_tuple=True)[1]       # [P] GT col
+                    pos_iou     = topk_iou[valid]                       # [P]
                     num_pos_total += pos_anchors.numel()
 
-                    # Soft cls target: take max in case two GTs share an anchor
-                    cls_col = gt_labels[m].item()
-                    tgt_cls[pos_anchors, cls_col] = torch.maximum(
-                        tgt_cls[pos_anchors, cls_col], pos_iou.detach()
+                    # Soft cls target: amax handles anchors shared by multiple GTs
+                    flat_idx = pos_anchors * C + gt_labels[pos_gt_idx]
+                    tgt_cls.view(-1).scatter_reduce_(
+                        0, flat_idx, pos_iou.detach(), reduce="amax"
                     )
 
-                    # Regression losses on positive anchors
-                    pos_pred = pred_b[pos_anchors]                         # [k, 4]
-                    pos_gt   = gt_boxes[m].unsqueeze(0).expand_as(pos_pred)  # [k, 4]
+                    # Regression losses on positive anchors (elementwise)
+                    pos_pred = pred_b[pos_anchors]       # [P, 4]
+                    pos_gt   = gt_boxes[pos_gt_idx]      # [P, 4]
 
                     loss_reg_total = loss_reg_total + F.l1_loss(
                         pos_pred, pos_gt, reduction="sum"
                     ).float()
 
-                    giou = generalized_box_iou(
+                    giou = _elementwise_giou(
                         box_cxcywh_to_xyxy(pos_pred), box_cxcywh_to_xyxy(pos_gt)
                     )
-                    loss_iou_total = loss_iou_total + (1 - giou.diagonal()).float().sum()
+                    loss_iou_total = loss_iou_total + (1 - giou).float().sum()
 
         # Varifocal cls loss: w = q for positives, alpha*p^gamma for negatives
         p_sig = pred_l.sigmoid()

@@ -1360,3 +1360,38 @@ confusing the watchdog into restart loops (14 W&B restarts on 2026-07-01).
 AP=0.0 at epochs 1–2 despite tuning from the AP=0.322 checkpoint — root cause
 not yet identified (BUG-038/039 are suspects via backbone corruption; eval-path
 P2 merge is the alternative). The E1 smoke test gates on epoch-0 AP ≥ 0.30.
+
+---
+
+## BUG-041 — P2 TAL assignment python loop: minutes per dense batch (2026-07-02)
+
+**Symptom:** msfd_640 smoke on RunPod 3090 ran ~1.8s/iter average with multi-minute
+stretches on dense images — ~30 min/epoch at 640px (vs ~4 min expected), 6× cost.
+
+**Root cause:** `p2_head_loss` looped over GTs per image (M up to ~900 on VisDrone)
+with `.item()`/`nonzero()` GPU syncs inside the loop.
+
+**Fix:** fully vectorized top-K TAL: single `topk(dim=0)` over the masked IoU
+matrix for all GTs, `scatter_reduce_(amax)` for soft cls targets shared between
+GTs, and a new `_elementwise_giou` (paired boxes) instead of the P×P
+`generalized_box_iou` matrix. Verified numerically identical to the loop
+implementation on synthetic data (ALL_MATCH). File: `src/zoo/dfine/p2_conv_head.py`.
+
+---
+
+## BUG-042 — untrained P2 merge floods eval topk, masks true AP (2026-07-02)
+
+**Symptom:** msfd_640 epoch-0 eval AP=0.2276 with tuned 0.322 checkpoint;
+AR500 = 0.394 vs baseline 0.506.
+
+**Root cause:** postprocessor concatenates all 25,600 P2 predictions with the
+decoder's 300 before topk-500. Untrained P2 head (zero-init cls) emits every box
+at exactly the prior score 0.01 — they fill ~200 of the top-500 slots and
+displace the decoder's low-confidence tail, truncating the PR curve.
+This ALSO explains the pre-fix "AP=0 during warmup" mystery (W2.3): with the
+old kaiming-init cls weights, 18% of 256K P2 scores exceeded 0.5, displacing
+ALL decoder predictions, → AP≈0.
+
+**Fix:** P2 logits below sigmoid=0.05 are masked to -inf before the merge —
+untrained P2 contributes nothing; trained confident P2 predictions merge
+normally. File: `src/zoo/dfine/postprocessor.py`.

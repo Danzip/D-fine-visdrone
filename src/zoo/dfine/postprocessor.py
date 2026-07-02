@@ -40,7 +40,16 @@ class DFINEPostProcessor(nn.Module):
 
         # Merge P2ConvHead dense predictions (msfd_1024 experiment)
         if "p2_logits" in outputs:
-            logits = torch.cat([logits, outputs["p2_logits"]], dim=1)
+            # BUG-042: only merge P2 predictions above a confidence floor.
+            # An untrained P2 head emits 25K boxes all at the prior score (0.01);
+            # they flood topk-500 and displace the decoder's low-confidence tail
+            # (AR500 0.51 -> 0.39, AP 0.32 -> 0.23 at epoch 0). masked_fill(-inf)
+            # keeps shapes static for batched topk.
+            p2_logits = outputs["p2_logits"]
+            p2_logits = p2_logits.masked_fill(
+                p2_logits.sigmoid() < 0.05, float("-inf")
+            )
+            logits = torch.cat([logits, p2_logits], dim=1)
             boxes  = torch.cat([boxes,  outputs["p2_boxes"]],  dim=1)
 
         bbox_pred = torchvision.ops.box_convert(boxes, in_fmt="cxcywh", out_fmt="xyxy")
