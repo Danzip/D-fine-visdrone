@@ -1,0 +1,44 @@
+# msfd_1024 polish v2: the first polish run's LR (peaking 6e-6, only ~14% decayed
+# by ep7) was still too high — AP declined ep4->ep7 (0.3216->0.3089) instead of
+# stabilizing. Tune from that run's actual best (best_stg2.pth = epoch 4,
+# AP=0.3216, confirmed the true peak vs ep2/ep6) and start much lower: backbone
+# 3e-7, decaying to 1e-8 over 50 clean epochs. Minimal perturbation, pure polish.
+__include__: ['../msfd_1024/config.yml']
+
+output_dir: ./output/msfd_1024_polish2
+epochs: 50
+
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 0
+  cosine_epochs: 50
+  warmup_start_lr: 0.00000001
+  eta_min: 0.00000001
+  milestones: ~
+  gamma: ~
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.0000003
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.0000003
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder|p2_head))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.0000006
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 0    # augs off from epoch 0 (clean polish phase)
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 0   # single-scale (eval size) from the start — safe now (BUG-045 fixed)
