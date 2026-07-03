@@ -152,7 +152,14 @@ class DetSolver(BaseSolver):
             if dist_utils.is_dist_available_and_initialized():
                 self.train_dataloader.sampler.set_epoch(epoch)
 
-            if epoch == self.train_dataloader.collate_fn.stop_epoch:
+            # BUG-045: stop_epoch=0 means "no stage split, single-scale from the
+            # start" (used by clean-finetune/polish configs) — but epoch==0 is
+            # also true on iteration 0 of any run, so this unconditionally fired
+            # a full state reload (LR scheduler, optimizer, last_epoch) from
+            # best_stg1.pth on EVERY run with stop_epoch=0, even brand new ones.
+            # Guard: only a genuine stage-1->stage-2 transition (stop_epoch > 0)
+            # should trigger the reload.
+            if self.train_dataloader.collate_fn.stop_epoch > 0 and epoch == self.train_dataloader.collate_fn.stop_epoch:
                 self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
                 if self.ema:
                     self.ema.decay = self.train_dataloader.collate_fn.ema_restart_decay

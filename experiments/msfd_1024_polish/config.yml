@@ -5,8 +5,12 @@
 # over 50 clean epochs (augs off, single-scale, EMA fresh). 50 is a floor —
 # resume further from last.pth if AP is still climbing at ep50 (near-zero
 # marginal cost since LR is already at the 1e-7 hold by then).
+#
+# Own output_dir (separate from msfd_1024) so this run's checkpoints/log never
+# collide with or overwrite the original 110-epoch run's artifacts.
 __include__: ['../msfd_1024/config.yml']
 
+output_dir: ./output/msfd_1024_polish
 epochs: 50
 
 lr_scheduler:

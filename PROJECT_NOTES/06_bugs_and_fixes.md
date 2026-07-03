@@ -1418,3 +1418,49 @@ riskier than the workaround.
 25 clean epochs, warmup 0, cosine from current LR (6e-6 backbone / 1.2e-5 global)
 to 1e-7. Also note ep80 itself: augs-off caused an instant +1.8 AP jump
 (0.3031→0.3210) — the mid-run "dip" is entirely the augmentation tax.
+
+---
+
+## BUG-045 — stop_epoch=0 triggers destructive full-state reload (2026-07-03)
+
+**Symptom:** msfd_1024_polish run's LR curve rose across 24+ epochs instead of
+decaying — matched the ORIGINAL msfd_1024 run's `warmup_epochs=50` schedule
+almost exactly (verified numerically, ratio ~0.90-1.1 vs that hypothesis
+across ep20-24, vs wildly wrong for a cosine-decay hypothesis).
+
+**Root cause:** `det_solver.py` unconditionally reloads full training state
+(LR scheduler, optimizer, last_epoch, model weights) from `best_stg1.pth`
+whenever `epoch == collate_fn.stop_epoch`:
+```python
+if epoch == self.train_dataloader.collate_fn.stop_epoch:
+    self.load_resume_state(str(self.output_dir / "best_stg1.pth"))
+```
+The polish config set `stop_epoch: 0` to mean "single-scale collate from the
+start" (a legitimate, documented use) — but since epoch 0 is always the first
+epoch of ANY run, this ALSO unconditionally fired the reload on literally
+every run configured this way, restoring state from `output/msfd_1024/
+best_stg1.pth` — a checkpoint saved at **epoch 1 of the ORIGINAL 110-epoch
+run** (lr scheduler state: warmup_epochs=50, cosine_epochs=60, lr≈4e-7).
+The new run's carefully-configured cosine-decay schedule was overwritten
+before a single polish epoch had a chance to apply it. Confirmed by loading
+best_stg1.pth directly: `last_epoch=1`, `lr_scheduler: {warmup_epochs: 50,
+cosine_epochs: 60, ...}` — matches the corrupted run's observed LR curve.
+
+Model weights appeared to survive intact (AP stayed ~0.32 throughout,
+not crashing to near-random) — the corruption was confined to the
+optimizer/scheduler state, not present in a way that affects the model.
+
+**Fix:** guard the reload to only fire on a genuine stage transition:
+```python
+if self.train_dataloader.collate_fn.stop_epoch > 0 and epoch == ...:
+```
+`stop_epoch` defaults to `100_000_000` when unset (never fires) and the real
+msfd_1024 config uses `stop_epoch: 80` (unaffected by the `> 0` guard) — only
+the `stop_epoch: 0` degenerate case was broken. File: `src/solver/det_solver.py`.
+
+**Also fixed while here:** `msfd_1024_polish/config.yml` now sets its own
+`output_dir` (was inheriting `output/msfd_1024`, silently overwriting the
+original run's `best_stg2.pth`/log.txt/last.pth in place).
+
+**Cost:** ~3h of pod time (~$0.66) spent on the corrupted first polish attempt
+before this was caught and fixed.
