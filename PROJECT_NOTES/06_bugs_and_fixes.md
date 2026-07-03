@@ -1395,3 +1395,26 @@ ALL decoder predictions, → AP≈0.
 **Fix:** P2 logits below sigmoid=0.05 are masked to -inf before the merge —
 untrained P2 contributes nothing; trained confident P2 predictions merge
 normally. File: `src/zoo/dfine/postprocessor.py`.
+
+---
+
+## BUG-044 — stage-2 transition resets the LR scheduler (2026-07-03)
+
+**Symptom:** msfd_1024 log shows backbone LR cliff 5.31e-6 → 4.18e-7 at ep79→80,
+then LINEAR RISE through ep80-109 (6.33e-6 at ep109) — a second warmup instead of
+the WarmupCosineHoldLR cosine tail. Stage 2 (aug-off polish phase) therefore ran
+30 epochs of rewarming and never decayed; the run ended with AP still climbing.
+
+**Evidence this is long-standing:** the NWD-sqrt run (step 18) peaked at ep109/110
+— the same signature. Historic stage-2 phases have likely all been mid-rewarmup
+at finish, systematically leaving AP unharvested.
+
+**Root cause (suspected, not yet fixed):** the stop_epoch=80 stage-2 handler
+(same code region as BUG-036/037) rebuilds/reloads optimizer+scheduler, resetting
+`last_epoch` to 0. Fix deferred — mid-campaign changes to the solver core are
+riskier than the workaround.
+
+**Workaround:** `experiments/msfd_1024_polish/config.yml` — tune from best_stg2,
+25 clean epochs, warmup 0, cosine from current LR (6e-6 backbone / 1.2e-5 global)
+to 1e-7. Also note ep80 itself: augs-off caused an instant +1.8 AP jump
+(0.3031→0.3210) — the mid-run "dip" is entirely the augmentation tax.

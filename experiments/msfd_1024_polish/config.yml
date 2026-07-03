@@ -1,0 +1,43 @@
+# msfd_1024 polish: harvest the stage-2 decay that BUG-044 stole.
+# The 110-ep run ended mid-second-warmup (scheduler reset at the ep-80 stage-2
+# transition) at backbone lr 6.3e-6 with AP still rising. This run tunes from
+# best_stg2.pth (AP=0.3219) and applies the missing decay: current LR -> 1e-7
+# over 25 clean epochs (augs off, single-scale, EMA fresh).
+__include__: ['../msfd_1024/config.yml']
+
+epochs: 25
+
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 0
+  cosine_epochs: 25
+  warmup_start_lr: 0.00000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000006
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000006
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder|p2_head))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.000012
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 0    # augs off from epoch 0 (clean polish phase)
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 0   # single-scale (eval size) from the start
