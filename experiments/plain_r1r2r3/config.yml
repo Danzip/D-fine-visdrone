@@ -1,0 +1,91 @@
+# Plain architecture (no P2 head — msfd shelved, ~13% compute for ~noise-floor
+# gain) + R1/R2/R3 from the round-2 experiment list. Tunes from the real 0.322
+# checkpoint (best_stg1_dfine_s_visdrone_nwd_sqrt_v2.pth), single-stage clean
+# cosine schedule — deliberately NO stop_epoch>0 stage transition (the
+# underlying reload-corrupts-schedule risk from BUG-044 was only patched for
+# the stop_epoch=0 case, not fixed at the root for legitimate transitions).
+#
+# R2 — NWD as regression loss (not just matcher cost): loss_nwd added,
+#      additive to existing loss_vfl/loss_bbox/loss_giou/loss_fgl/loss_ddf.
+# R3 — rare-class CopyPaste: bicycle(2)/tricycle(6)/awning-tricycle(7) get
+#      3x paste weight + scale jitter.
+# R1 (cheap proxy) — RandomIoUCrop min_scale 0.3 -> 0.15: biases crops toward
+#      more aggressive zoom; the existing Resize-to-training-size step after
+#      the crop does the "zoom in" for free, no new code needed.
+__include__: ['../../configs/dfine/dfine_hgnetv2_s_visdrone_nwd.yml']
+
+output_dir: ./output/plain_r1r2r3
+exp_name: plain_r1r2r3
+epochs: 80
+
+DFINECriterion:
+  size_adaptive: True
+  sal_mode: 'sqrt'
+  use_nwd_loss: True
+  nwd_loss_constant: 0.5
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_nwd: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2, cost_nwd: 2}
+    nwd_constant: 0.5
+    alpha: 0.25
+    gamma: 2.0
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00001
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00001
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00002
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 10
+  cosine_epochs: 70
+  warmup_start_lr: 0.0000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+  T_max: ~   # base config (CosineAnnealingLR) sets this; must null it out —
+             # create() merges kwargs key-by-key and does NOT filter by the
+             # target class's actual signature, so a leftover non-None T_max
+             # would crash WarmupCosineHoldLR.__init__() (no such parameter)
+
+train_dataloader:
+  total_batch_size: 8
+  num_workers: 4
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1024, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8, min_scale: 0.15}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5,
+           rare_labels: [2, 6, 7], rare_boost: 3.0, scale_jitter: [0.7, 1.4]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 65    # augs off for the last 15 epochs (safe: dataset-level only, no solver reload)
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 999    # never fires — avoids the reload-corruption risk entirely
+    base_size: 1024
+    base_size_repeat: 3
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+accum_steps: 4
