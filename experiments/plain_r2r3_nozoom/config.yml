@@ -1,0 +1,30 @@
+# Hedge variant of plain_r1r2r3: identical R2 (NWD loss) + R3 (rare-class
+# CopyPaste) but WITHOUT the R1 zoom-crop change (RandomIoUCrop min_scale
+# stays at the default 0.3, not 0.15). R1 was invented today with much less
+# validation than R2/R3 (which have clear theoretical grounding + partial
+# historical precedent) — this parallel run finds out fast whether the more
+# aggressive zoom is helping or hurting, without waiting for plain_r1r2r3 to
+# finish and without needing to attribute credit within a single run.
+__include__: ['../plain_r1r2r3/config.yml']
+
+output_dir: ./output/plain_r2r3_nozoom
+exp_name: plain_r2r3_nozoom
+
+train_dataloader:
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1024, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1024, 1024]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5,
+           rare_labels: [2, 6, 7], rare_boost: 3.0, scale_jitter: [0.7, 1.4]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 65
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
