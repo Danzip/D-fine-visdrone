@@ -1464,3 +1464,65 @@ original run's `best_stg2.pth`/log.txt/last.pth in place).
 
 **Cost:** ~3h of pod time (~$0.66) spent on the corrupted first polish attempt
 before this was caught and fixed.
+
+---
+
+## BUG-043 — PyTorch profiler warning treated as fatal (2026-07-03)
+
+**Symptom:** an early msfd_1024 launch attempt aborted on a profiler-related
+warning/exception during startup.
+
+**Fix:** made the profiler call non-fatal (wrapped/guarded so a profiler
+failure doesn't kill the run). Pushed alongside BUG-038/039 fixes
+(commit `9dd2006`). Not deeply investigated beyond the immediate unblock —
+revisit if profiler-related aborts recur.
+
+---
+
+## BUG-046 — WSL2 `vmIdleTimeout` silently kills detached babysitters,
+idle-pod billing (2026-07-05)
+
+**Symptom:** two parallel RunPod pods (`plain_r1r2r3`, `plain_r2r3_nozoom`)
+each finished training cleanly on their own (~9h each, matching plan) but sat
+**idle for ~11-12 hours afterward** before anyone noticed, burning ~$4.80 —
+more than the marginal compute cost of the experiments themselves. Both
+babysitter logs (`~/.runpod/babysitter.sh` / `babysitter2.sh`) simply stopped
+mid-loop with no error message, ~14h before being checked.
+
+**Root cause:** WSL2's default `vmIdleTimeout` tears down the entire
+lightweight VM a short time (~1 min) after the last attached window/session
+closes. This kills every process running inside it, including background
+jobs launched with `setsid nohup ... & disown` — those constructs only
+protect against a *closed terminal*, not a *torn-down VM*. The user closed
+their Claude Code/WSL session for the night; WSL shut itself down shortly
+after; both babysitters (and their "stop the pod when done" logic) died with
+it, while training itself kept running fine on the remote pods since they
+don't depend on the local machine at all.
+
+**Fix:**
+1. Added `vmIdleTimeout=-1` to `.wslconfig` (`[wsl2]` section) — the VM (and
+   anything backgrounded inside it) now survives indefinitely with zero
+   windows open. Requires `wsl --shutdown` (or a reboot) to take effect.
+2. Built `~/.runpod/autostop_launch.sh` — training is now launched wrapped
+   so the **pod itself** calls RunPod's stop API the instant training exits
+   (success or crash), plus a deadman-switch timer (default 14h) that force-
+   stops the pod regardless if training hangs. Both run from a `setsid`'d
+   process on the pod, fully independent of the laptop/WSL/terminal — the
+   pod stops itself even if the laptop is powered off entirely. The RunPod
+   API key is copied to the pod `chmod 600` (root-only) and `shred -u`'d
+   immediately after the stop-call fires, so it's exposed only for the
+   run's duration, not indefinitely. This required explicit user
+   authorization (copying an account-wide API key onto rented/external
+   hardware is a real risk) — Claude Code's permission system correctly
+   blocked two earlier attempts until the user gave direct sign-off.
+   **Standing reminder: rotate the RunPod API key after any pod that used
+   this wrapper is deleted.**
+
+Both idle pods were found via a direct RunPod GraphQL query
+(`desiredStatus: RUNNING` with `uptimeInSeconds` far exceeding the expected
+~9h training time), confirmed finished via SSH, checkpoints downloaded, then
+stopped manually. See `~/.runpod/autostop_launch.sh` for the reusable
+launch wrapper — this should be the standard way to launch any future
+RunPod training run, superseding the old bare
+`setsid nohup python train.py` + separate local-babysitter pattern for the
+stop-on-completion piece.

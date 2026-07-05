@@ -1,3 +1,12 @@
+> **Superseded (2026-07-05):** current best is now AP=0.3226
+> (`output/runpod_results/polish2_last.pth`, see `00_progress.md` Step 25) and
+> the live experiment plan/tracker is `11_ablation_study_runpod.md`. This file
+> is kept for historical context on ar_aware/p2_640/msfd_1024's original design
+> — ar_aware finished (0.318, below its 0.321 starting point, see
+> `11_ablation_study_runpod.md` §1 W-AR), p2_640 was never launched, and
+> msfd_1024 became the flagship P2ConvHead run (Step 24) before the
+> architecture line was shelved (Step 26).
+
 # Next Experiments Plan (updated 2026-05-10)
 
 ## Current Best

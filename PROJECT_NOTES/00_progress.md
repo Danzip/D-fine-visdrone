@@ -26,8 +26,13 @@
 | 19 | Cloud training setup (RunPod) | ✅ COMPLETE — RunPod RTX A5000 ($0.27/hr, 24GB); AWS quota denied × 2 |
 | 20 | nwd_sal_linear — 1/area weighting | ❌ ABANDONED — killed ep35; AP regressed 0.321→0.315; 1/area too aggressive even with slow warmup |
 | 21 | ar_aware — rectangular AR-aware training | ✅ COMPLETE — final AP=0.318 (ep110, ar_aware_p2 0.3181); never beat the 0.321 starting checkpoint. Post-mortem in 11_ablation_study_runpod.md (W-AR) |
-| 22 | p2_640 — 4-level D-FINE at 640×640 | ✅ READY — pure config; P2+P3+P4+P5 in full transformer; 34K tokens |
+| 22 | p2_640 — 4-level D-FINE at 640×640 | ❌ NEVER LAUNCHED — user killed the tournament runner (2.6× compute of msfd); superseded by msfd_1024 |
 | 23 | msfd_1024 — YOLOv8-style P2 conv head | ✅ READY — P2ConvHead (DWConv×2, FCOS TAL); transformer stays 3-level; P2 at 256×256 via conv only |
+| 24 | msfd_1024 run (P2ConvHead+P2FusionLite + R2 NWD-loss + R3 rare-CopyPaste) | ✅ COMPLETE (2026-07-03) — **AP=0.3219 @ep109** (ties old best), **AP-small=0.2323 (new record, +0.6)**. Found BUG-044 (stage-2 LR-scheduler reset, run ended mid-climb) |
+| 25 | msfd_1024_polish → polish2 (ultra-low-LR polish, 50ep, augs off) | ✅ COMPLETE (2026-07-04) — **polish2 final AP=0.3226 / AP-small=0.2344 — NEW STANDING BEST** (ep44 peak, flat plateau ep22-49, genuine convergence). Found+fixed BUG-045 (destructive stop_epoch=0 reload) |
+| 26 | msfd/P2 line **SHELVED by user decision** (2026-07-04) — "10% overhead with 0 gain" | — |
+| 27 | plain_r1r2r3 + plain_r2r3_nozoom (R1 zoom-crop + R2 NWD-loss + R3 rare-CopyPaste, plain 3-level architecture, no P2 head; parallel pods to isolate R1) | ✅ COMPLETE (2026-07-05) — **neither beat standing best**: r1r2r3 AP=0.3183, nozoom AP=0.3188 (vs 0.3226). Isolating R1 (nozoom minus r1r2r3): zoom-crop alone ≈ **-0.0005 AP, not the hoped-for +1-2 APs** — R1's premise not validated. Idle-billing incident during this run: BUG-046 |
+| 28 | R4 — per-class score calibration (eval-only, $0) | ⏳ IN PROGRESS (2026-07-05) — see write-up below |
 | 13 | README + GitHub | ⏳ PENDING |
 
 ### Possible ablation (low priority, do after step 8–9 if time permits)
@@ -512,3 +517,153 @@ Both experiments prepared and verified; ready to launch.
 
 **New code:** `src/zoo/dfine/p2_conv_head.py` (P2ConvHead + p2_head_loss)
 Minimal changes to: dfine.py, dfine_criterion.py, postprocessor.py, __init__.py
+
+---
+
+## Step 24 — msfd_1024 run: P2ConvHead+P2FusionLite + R2 NWD-loss + R3 rare-CopyPaste — COMPLETE (2026-07-03)
+
+The flagship RunPod campaign run: P2ConvHead + P2FusionLite (cheap fusion of
+raw P2 + upsampled neck-P3, +15% compute at 1024) + NWD regression loss (R2)
++ rare-class CopyPaste (R3), tuned from the v2 NWD-sqrt checkpoint (AP=0.322),
+110 epochs on a RunPod RTX 3090.
+
+**Result: AP=0.3219 @ep109** (ties old best), **AP-small=0.2323** (new record,
++0.6 over the 0.322 checkpoint's 0.226).
+
+**BUG-044 found:** the stage-2 (ep80, augs-off) transition resets the LR
+scheduler instead of continuing its decay — stage 2 re-warmed for 30 epochs
+instead of decaying, so the run ended mid-climb at lr 6.3e-6, AP still rising.
+Root cause not fixed (deferred, risky mid-campaign solver change);
+`msfd_1024_polish` was launched as a targeted workaround (Step 25). Also
+found: epoch 80 (augs-off) caused an instant +1.8 AP jump — the mid-run "dip"
+seen throughout this project's history is entirely the augmentation tax, not
+a training-quality problem. Full bug details: `06_bugs_and_fixes.md` BUG-044.
+
+---
+
+## Step 25 — msfd_1024_polish → polish2 (ultra-low-LR polish) — COMPLETE, NEW BEST (2026-07-04)
+
+Targeted fix for BUG-044: continue from the true ep109 peak checkpoint with a
+clean, low-LR cosine decay (no stage transition to trigger the reload bug).
+
+First polish attempt was itself silently corrupted (**BUG-045**: `stop_epoch:
+0`, meant only as "single-scale from start," also unconditionally re-triggered
+det_solver.py's stage-transition full-state reload from a stale epoch-1
+checkpoint — the new cosine schedule never applied, ~3h/$0.66 wasted before
+caught). Fixed (`det_solver.py`, guard `stop_epoch > 0`), then relaunched as
+**polish2**: backbone LR 3e-7→1e-8 over 50 epochs, augs off throughout.
+
+**Final result: AP=0.3226, AP-small=0.2344 — NEW STANDING BEST.** Peaked
+epoch 44; epochs 22-49 sit in a flat plateau of 0.3223-0.3226 (genuine
+convergence, not a single-epoch noise spike — the measured noise floor over
+this plateau is ~0.001 AP). Checkpoint: `output/runpod_results/polish2_last.pth`.
+
+A control experiment (does *any* extra low-LR polish help equally, independent
+of the P2/NWD-loss/rare-paste bundle?) was identified as the natural next
+step to attribute the +0.0038 AP gain correctly, but the user made a judgment
+call to skip it: **"10% overhead with 0 gain [in msfd_640's original
+mechanism check]... results speak for themselves"** — the msfd/P2 architecture
+line was shelved in favor of testing other directions on the plain
+(non-P2) architecture instead (Step 27).
+
+---
+
+## Step 26 — msfd/P2 architecture line SHELVED (2026-07-04)
+
+User decision, not a technical failure: the P2ConvHead/P2FusionLite line
+reached AP=0.3226 (a real, if modest, +0.0038 improvement) but at meaningful
+compute overhead (+15% at 1024px) with an unresolved attribution question
+(control experiment above). Rather than spend further budget disentangling
+it, effort moved to testing other candidate improvements (R1/R2/R3 from
+`11_ablation_study_runpod.md` §5) on the simpler plain 3-level architecture.
+polish2's checkpoint remains the standing best regardless of this decision.
+
+---
+
+## Step 27 — plain_r1r2r3 + plain_r2r3_nozoom — COMPLETE, neither beats best (2026-07-05)
+
+Two parallel RunPod pods, both tuned from the real 0.322 (pre-P2) checkpoint,
+plain 3-level architecture (no P2 head), single-stage clean cosine (80 epochs,
+no stage transition — sidesteps the BUG-045 class of bug entirely):
+
+- **`plain_r1r2r3`** — R1 (aggressive zoom-crop, `RandomIoUCrop` min_scale
+  0.3→0.15) + R2 (NWD regression loss) + R3 (rare-class CopyPaste 3x boost).
+  Final **AP=0.3183, AP-small=0.2293** (training time 9:09:54).
+- **`plain_r2r3_nozoom`** — same as above minus R1 (zoom-crop reverted to
+  default min_scale 0.3), to isolate R1's individual effect. Final
+  **AP=0.3188, AP-small=0.2301** (training time 9:00:18).
+
+**Neither beats the standing best (AP=0.3226).** Isolating R1's effect
+(nozoom minus r1r2r3): the zoom-crop alone comes out **very slightly
+negative** (-0.0005 AP) — within noise, but not the hypothesized +1-2 APs.
+R1's premise (more pixels-per-object during training helps small objects) is
+not validated by this result.
+
+**Infra incident during this run:** both pods finished cleanly and then sat
+idle for ~11h afterward (local babysitter died when WSL2 tore down its VM
+after the laptop was closed for the night) — ~$4.80 burned on pure idle
+billing, more than the marginal training cost. Root-caused and fixed:
+`06_bugs_and_fixes.md` BUG-046. Checkpoints:
+`output/runpod_results/plain_r1r2r3_last.pth`,
+`output/runpod_results/plain_r2r3_nozoom_last.pth`.
+
+---
+
+## Step 28 — R4: per-class score calibration (eval-only) — IN PROGRESS (2026-07-05)
+
+`DFINEPostProcessor` picks its global top-500 detections per image by
+flattening (query, class) scores and taking `torch.topk` over the flattened
+tensor (`src/zoo/dfine/postprocessor.py`) — classes compete directly for the
+maxDets=500 budget. A systematically under-confident class can lose slots to
+a better-calibrated common class even where its own localization is correct.
+A monotonic per-class rescaling can't change within-class AP (COCO AP is
+rank-based) but *can* change which detections survive this cross-class cut.
+
+Method (`tools/calibration/calibrate_scores.py`): fit a per-class logit-space
+bias on the full TRAIN split (median matched-TP score per class, boost
+under-confident classes up to the least-under-confident class's level, never
+suppress), then report the frozen bias applied to the VAL split against a
+bias=0 baseline (same checkpoint, same eval, so the baseline reproduces the
+standing best as a sanity check).
+
+**Result (full ~6471-image train split, 2,728-134,184 matched TPs per
+class — stable): net negative, hypothesis partially confirmed.**
+
+Fitted bias (logit space) and train-split median TP score per class:
+
+| Class | n_tp | median score | bias |
+|---|---|---|---|
+| pedestrian | 63,445 | 0.652 | +0.996 |
+| people | 20,966 | 0.514 | +1.566 |
+| bicycle | 7,768 | 0.453 | +1.813 |
+| car | 134,184 | 0.820 | +0.103 |
+| van | 23,391 | 0.688 | +0.829 |
+| truck | 11,601 | 0.717 | +0.690 |
+| tricycle | 4,121 | 0.502 | +1.615 |
+| awning-tricycle | 2,728 | 0.516 | +1.557 |
+| bus | 5,369 | 0.835 | +0.000 (target class) |
+| motor | 25,254 | 0.605 | +1.195 |
+
+VAL-split before/after (frozen bias, held-out from fitting):
+
+- Overall AP: 0.3225 → 0.3196 (**-0.0029**)
+- Overall AP50: 0.5238 → 0.5196 (**-0.0042**)
+- Per-class AP50: **every class the hypothesis predicted would gain, did**
+  (people +0.0021, bicycle +0.0027, tricycle +0.0028, awning-tricycle
+  +0.0032, motor +0.0014) — confirming rare/under-confident classes were
+  genuinely losing top-500 slots to better-calibrated classes. But
+  **car (-0.0102), truck (-0.0036), van (-0.0025), and especially bus
+  (-0.0377) all dropped**, outweighing the gains: boosting several classes
+  at once increases competition pressure on the shared 500-detection budget
+  more than it relieves it for any one class.
+
+**Verdict: R4's core hypothesis is directionally validated (rare classes
+really are under-confident, boosting them really does recover some of their
+lost recall) but this specific implementation (independent per-class
+median-equalization) is net negative and not adopted.** A jointly-optimized
+bias (e.g. coordinate-ascent directly maximizing overall AP rather than
+equalizing medians) might recover the small-class gains without the
+large-class cost, but that's a materially bigger undertaking than the
+"$0, eval-only" scope this was budgeted for — not pursued further for now.
+Script: `tools/calibration/calibrate_scores.py`. Full results:
+`output/calibration/r4_results.json`.

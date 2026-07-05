@@ -1,0 +1,94 @@
+# E6: 1280x1280 resolution unlock (diagnostic -- "how much does resolution
+# alone give us", not necessarily the model we ship).
+#
+# Tuned from msfd_1024's own ep109 checkpoint (AP=0.3219), NOT polish2
+# (AP=0.3226). Both share the same architecture and are within 0.0007 AP of
+# each other, but msfd_1024_best_ep109 has had only ~31 single-scale-only
+# epochs since its own multi-scale phase ended, vs polish2's ~81 (msfd_1024's
+# 31 + polish2's own 50 single-scale epochs). msfd_1024's multi-scale phase
+# (generate_scales(1024, 3) = [768..992, 1024x3, 1280..1056]) already
+# included genuine 1280x1280 batches, so this checkpoint should retain more
+# of that exposure than one that's been single-scale-locked for longer --
+# deliberately chosen to reduce (not eliminate) the historical
+# resolution-jump collapse risk (see PROJECT_NOTES/11_ablation_study_runpod.md
+# W3: 4/4 prior naive resolution jumps flatlined at AP 0.11-0.13).
+#
+# Root-cause fix for that collapse is NOT "AIFI positional-embedding
+# interpolation" as originally planned -- AIFI's sin-cos PE
+# (build_2d_sincos_position_embedding) is recomputed fresh from the actual
+# feature-map size on every forward pass, already resolution-agnostic, no
+# learned table to interpolate. The actual suspect is enc_score_head /
+# dec_score_head biases: initialized once via bias_init_with_prob(0.01) at
+# construction, then silently inherited unchanged from the checkpoint when
+# tuning -- miscalibrated for a ~2x denser anchor grid at 1280 vs 1024.
+# reset_score_head_bias resets them fresh instead (src/solver/_solver.py).
+__include__: ['../msfd_1024/config.yml']
+
+output_dir: ./output/e6_1280
+exp_name: e6_1280
+tuning: output/runpod_results/msfd_1024_best_ep109.pth
+reset_score_head_bias: True
+
+eval_spatial_size: [1280, 1280]
+
+epochs: 50
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 5
+  cosine_epochs: 45
+  warmup_start_lr: 0.0000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.00001
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.00001
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder|p2_head))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00002
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+train_dataloader:
+  total_batch_size: 4    # 1280px at fixed batch (no multi-scale headroom to shrink into)
+  dataset:
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 1280, p: 0.5}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [1280, 1280]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5,
+           rare_labels: [2, 6, 7], rare_boost: 3.0, scale_jitter: [0.7, 1.4]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 35    # augs off for a clean final ~15-epoch tail (established +1.8 AP pattern)
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 0    # single-scale (1280, fixed) from the start -- clean, isolated resolution
+                     # test, no multi-scale re-mixing. stop_epoch=0 is safe (BUG-045 fixed).
+    base_size: 1280
+    base_size_repeat: ~   # explicitly nulled -- avoid a leftover multi-scale list ever being
+                           # consulted (T_max-style merge lesson from 2026-07-04)
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [1280, 1280]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}

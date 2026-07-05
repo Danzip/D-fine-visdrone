@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from ..core import BaseConfig
 from ..misc import dist_utils
+from ..zoo.dfine.utils import bias_init_with_prob
 
 
 def to(m: nn.Module, device: str):
@@ -366,6 +367,21 @@ class BaseSolver(object):
                     adjusted_params.append(param_name)
                 else:
                     print(f"Cannot adjust parameter '{param_name}' due to size mismatch.")
+
+        # E6: when tuning onto a new eval_spatial_size (denser/sparser anchor
+        # grid), enc_score_head/dec_score_head biases learned at the OLD grid
+        # density are miscalibrated for the new one (see PROJECT_NOTES/
+        # 11_ablation_study_runpod.md W3) -- reset them to the same
+        # bias_init_with_prob(0.01) prior used at fresh construction instead
+        # of silently inheriting the old-resolution-tuned value.
+        if self.cfg.yaml_cfg.get("reset_score_head_bias", False):
+            fresh_bias = bias_init_with_prob(0.01)
+            for param_name in head_param_names:
+                if param_name.endswith(".bias") and param_name in pretrain_state_dict:
+                    pretrain_state_dict[param_name] = torch.full_like(
+                        pretrain_state_dict[param_name], fresh_bias
+                    )
+            print(f"reset_score_head_bias: reset {sum(1 for p in head_param_names if p.endswith('.bias'))} score-head biases to {fresh_bias:.4f}")
 
         return pretrain_state_dict
 

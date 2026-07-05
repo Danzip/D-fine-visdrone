@@ -14,10 +14,11 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 | Multi-scale training 1024px (80 ep) | 25.5% | 42.4% | 17.8% | - | 38 MB FP32 |
 | + Extended training (131 ep) | 29.7% | 47.9% | 20.8% | - | 38 MB FP32 |
 | + Mosaic + multi-scale retraining (160 ep) | 31.6% | 50.7% | 22.5% | - | 38 MB FP32 |
-| + NWD matching + size-adaptive loss (ep109) | **32.1%** | **50.4%** | **23.0%** | - | 38 MB FP32 |
+| + NWD matching + size-adaptive loss (ep109) | 32.1% | 50.4% | 23.0% | - | 38 MB FP32 |
+| + P2 conv head + P2FusionLite + NWD-loss + rare CopyPaste, ultra-low-LR polish (RunPod, 2026-07-04) | **32.26%** | - | **23.44%** | - | 38 MB FP32 |
 | INT8 on Snapdragon 8 Gen 2 | - | - | - | **47 ms / 21 FPS** | **10 MB INT8** |
 
-SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **32.1%** with 10M params as a general-purpose detector fine-tuned on VisDrone - gap to same-size SOTA is ~3.5 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded).
+SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **32.26%** with 10M params as a general-purpose detector fine-tuned on VisDrone - gap to same-size SOTA is ~3.3 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded) — note the INT8/latency figures above are from the 32.1% checkpoint; the 32.26% checkpoint has not yet been re-deployed. A follow-up RunPod campaign (`PROJECT_NOTES/11_ablation_study_runpod.md`) tested a P2 conv-head architecture (this row), plus several augmentation/loss ideas on the simpler non-P2 architecture (crop-zoom, NWD regression loss, rare-class CopyPaste) that did not beat the P2 result; per-class score calibration and a 1280px resolution unlock (AIFI positional-embedding interpolation) are the current next steps — see that doc for details.
 
 ### Per-class AP - epoch-131 checkpoint (baseline for Mosaic+RFS retraining)
 
