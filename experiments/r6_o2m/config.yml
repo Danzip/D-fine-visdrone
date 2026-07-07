@@ -1,0 +1,71 @@
+# R6: one-to-many auxiliary matching (H-DETR-lite), see
+# PROJECT_NOTES/11_ablation_study_runpod.md R6 and 06_bugs_and_fixes.md
+# BUG-048.
+#
+# The matcher already had a get_top_k_matches/return_topk mechanism for
+# iterated-Hungarian one-to-many matching, but it was dead code -- never
+# wired into the criterion, and had a real indexing bug (masked queries
+# across the whole batch using target-index values reinterpreted as query
+# indices, instead of scoping to the current image's matched query rows).
+# Fixed in src/zoo/dfine/matcher.py, then wired into DFINECriterion as a new
+# additive auxiliary loss (o2m_k, o2m_loss_weight) on the FINAL decoder layer
+# only -- it does not replace the existing one-to-one loss, so eval/inference
+# behavior is completely unaffected; this only adds extra training-time
+# gradient so more queries get positive supervision per GT, targeting W4
+# (dense-scene recall cap: AR-500=0.507 vs AR-100=0.367 in one eval, decoder
+# has only 300 queries / one-to-one matching).
+#
+# Verified locally (2026-07-07): unit test on the fixed matcher (each GT
+# matched to exactly k distinct queries, no query reuse, empty-target images
+# handled) + 100 real training iterations on this repo's actual VisDrone
+# data/multi-scale pipeline, including a dense-scene batch (173+103 boxes in
+# one batch) -- loss_vfl_o2m/loss_bbox_o2m/loss_giou_o2m all finite and
+# stable across iterations, no crash, no NaN.
+#
+# Tuned from E6's own best checkpoint (AP=0.344, ep46/50) -- NOT a
+# resolution jump this time (both at 1280), so reset_score_head_bias is
+# turned back OFF (would needlessly destroy E6's already-good calibration).
+__include__: ['../e6_1280/config.yml']
+
+output_dir: ./output/r6_o2m
+exp_name: r6_o2m
+tuning: output/runpod_results/e6_1280_best_ep46.pth
+reset_score_head_bias: False
+
+DFINECriterion:
+  o2m_k: 3            # each GT additionally matched to its next-2-best queries (k=3 total incl. the primary one-to-one match)
+  o2m_loss_weight: 0.5 # down-weighted relative to the primary one-to-one loss -- matches what was smoke-tested locally
+
+epochs: 30
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 3
+  cosine_epochs: 27
+  warmup_start_lr: 0.0000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.000005
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.000005
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder|p2_head))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.000015   # lower peak than E6's 0.00002 -- continuing an already-converged checkpoint, not a resolution transfer
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+train_dataloader:
+  dataset:
+    transforms:
+      policy:
+        epoch: 20    # augs off for a clean final 10-epoch tail (same proportion as E6's 35/50)
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']

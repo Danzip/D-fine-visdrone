@@ -7,7 +7,6 @@ Copyright (c) 2024 The D-FINE Authors All Rights Reserved.
 
 from typing import Dict
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -142,23 +141,33 @@ class HungarianMatcher(nn.Module):
         return {"indices": indices}  # , 'indices_o2m': C.min(-1)[1]}
 
     def get_top_k_matches(self, C, sizes, k=1, initial_indices=None):
+        """R6: iterated Hungarian rounds for one-to-many auxiliary matching.
+
+        Each round after the first masks out only the queries matched in
+        prior rounds (all targets stay available every round), so each GT
+        accumulates up to k distinct matched queries across rounds. Masking
+        must be scoped to (this image, its matched query rows) only --
+        `C.split(sizes, -1)` chunks share storage with C but each chunk still
+        carries the full batch dim, so writing `chunk[:, idx] = ...` would
+        corrupt every other image's costs using target-index values
+        reinterpreted as query indices. Index `chunk[img_idx, rows, :]`
+        instead.
+        """
         indices_list = []
-        # C_original = C.clone()
         for i in range(k):
             indices_k = (
-                [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+                [linear_sum_assignment(c[j]) for j, c in enumerate(C.split(sizes, -1))]
                 if i > 0
                 else initial_indices
             )
             indices_list.append(
                 [
-                    (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
-                    for i, j in indices_k
+                    (torch.as_tensor(row, dtype=torch.int64), torch.as_tensor(col, dtype=torch.int64))
+                    for row, col in indices_k
                 ]
             )
-            for c, idx_k in zip(C.split(sizes, -1), indices_k):
-                idx_k = np.stack(idx_k)
-                c[:, idx_k] = 1e6
+            for img_idx, (c, (row, _col)) in enumerate(zip(C.split(sizes, -1), indices_k)):
+                c[img_idx, row, :] = 1e6
         indices_list = [
             (
                 torch.cat([indices_list[i][j][0] for i in range(k)], dim=0),
@@ -166,5 +175,4 @@ class HungarianMatcher(nn.Module):
             )
             for j in range(len(sizes))
         ]
-        # C.copy_(C_original)
         return indices_list

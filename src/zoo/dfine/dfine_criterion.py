@@ -46,6 +46,8 @@ class DFINECriterion(nn.Module):
         sal_mode='sqrt',
         use_nwd_loss=False,
         nwd_loss_constant=0.5,
+        o2m_k=0,
+        o2m_loss_weight=1.0,
     ):
         """Create the criterion.
         Parameters:
@@ -56,6 +58,15 @@ class DFINECriterion(nn.Module):
             reg_max (int): Max number of the discrete bins in D-FINE.
             boxes_weight_format: format for boxes weight (iou, ).
             sal_mode: 'sqrt' for 1/sqrt(area) weighting, 'linear' for 1/area weighting.
+            o2m_k: R6 one-to-many auxiliary matching (H-DETR-lite). 0/1 disables it.
+                >1 additionally matches each GT to its top-k best predictions (via
+                the matcher's existing get_top_k_matches) and adds a down-weighted
+                auxiliary loss on the final decoder layer only -- extra positive
+                gradient for dense scenes, on top of (not replacing) the standard
+                one-to-one loss. Purely a training-time addition; matching has no
+                effect on eval/inference.
+            o2m_loss_weight: multiplier applied on top of the normal weight_dict
+                values for the o2m auxiliary loss terms.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -70,6 +81,8 @@ class DFINECriterion(nn.Module):
         self.sal_mode = sal_mode
         self.use_nwd_loss = use_nwd_loss
         self.nwd_loss_constant = nwd_loss_constant
+        self.o2m_k = o2m_k
+        self.o2m_loss_weight = o2m_loss_weight
         self.fgl_targets, self.fgl_targets_dn = None, None
         self.own_targets, self.own_targets_dn = None, None
         self.reg_max = reg_max
@@ -378,6 +391,37 @@ class DFINECriterion(nn.Module):
             l_dict = self.get_loss(loss, outputs, targets, indices_in, num_boxes_in, **meta)
             l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
             losses.update(l_dict)
+
+        # R6: one-to-many auxiliary matching (H-DETR-lite). Final layer only,
+        # additive to the one-to-one loss above (not a replacement) -- see
+        # __init__ docstring. "local" (FGL/DDF) is skipped: it depends on
+        # per-forward cached targets tied to the main one-to-one indices.
+        if self.o2m_k and self.o2m_k > 1:
+            indices_o2m = self.matcher(outputs_without_aux, targets, return_topk=self.o2m_k)[
+                "indices_o2m"
+            ]
+            num_boxes_o2m = sum(len(x[0]) for x in indices_o2m)
+            num_boxes_o2m = torch.as_tensor(
+                [num_boxes_o2m], dtype=torch.float, device=next(iter(outputs.values())).device
+            )
+            if is_dist_available_and_initialized():
+                torch.distributed.all_reduce(num_boxes_o2m)
+            num_boxes_o2m = torch.clamp(num_boxes_o2m / get_world_size(), min=1).item()
+
+            for loss in self.losses:
+                if loss == "local":
+                    continue
+                meta = self.get_loss_meta_info(loss, outputs_without_aux, targets, indices_o2m)
+                l_dict = self.get_loss(
+                    loss, outputs_without_aux, targets, indices_o2m, num_boxes_o2m, **meta
+                )
+                l_dict = {
+                    k: l_dict[k] * self.weight_dict[k] * self.o2m_loss_weight
+                    for k in l_dict
+                    if k in self.weight_dict
+                }
+                l_dict = {k + "_o2m": v for k, v in l_dict.items()}
+                losses.update(l_dict)
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:

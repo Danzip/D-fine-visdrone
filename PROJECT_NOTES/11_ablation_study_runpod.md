@@ -1,7 +1,11 @@
 # Ablation Study Plan — RunPod Campaign (2026-07-02)
 
 **Goal:** improve on AP=0.322 (NWD+sqrt best); stretch goal: reach/pass SOTA
-(DroneScan-YOLO 0.356, 10M params, 1280×1280).
+(DroneScan-YOLO 0.356, 10M params, 1280×1280). **Caveat (2026-07-07):** this
+0.356 figure is DroneScan-YOLO's own paper-reported number — a search for
+their official released weights turned up nothing public, so it's never
+been independently reproduced/verified here. Treat every "gap to SOTA"
+number in this doc accordingly.
 **Budget:** $17 on RunPod RTX A5000 ($0.27/hr ≈ 63 GPU-hours). (Revised down
 from $30 on 2026-07-02; user added +$50 on 2026-07-04, ~$56 total spent to date.)
 **Current best (2026-07-05):** `output/runpod_results/polish2_last.pth` —
@@ -197,7 +201,7 @@ H-DETR/Co-DETR line, NWD-loss literature.
 | R2 | **NWD/WIoU regression loss** | NWD is currently only in the matcher COST + SAL weighting; the regression loss itself is still L1+GIoU (scale-blind). Swap GIoU→NWD-loss (or Wise-IoU) for matched pairs. | ~20 LoC + run | +0.5–1.5 APs | ⚠️ **TESTED bundled with R3** (msfd_1024 and plain_r1r2r3/nozoom) — bundle underperformed standing best each time; R2's isolated effect not separately measured (no R2-only control run) |
 | R3 | **Class-targeted CopyPaste 2.0** | Current CopyPasteSmall pastes any ≤32px object. Paste rare classes preferentially (bicycle AP≈0.11, tricycle, awning-tricycle) with 0.5–1.5× scale jitter. Attacks the per-class tail directly. | ~30 LoC + run | +1–2 AP on rare classes | ⚠️ **TESTED bundled with R2** — see above; isolated effect not separately measured |
 | R4 | **Per-class score calibration** | Eval-only: rare classes are systematically under-confident; fit per-class temperature/offset on train-split predictions. Free AP50, no retraining. | eval only, $0 | +0.3–0.8 AP50 | ❌ **TESTED 2026-07-05, net negative** (AP50 0.5238→0.5196). Hypothesis partially confirmed — every predicted-under-confident class gained AP50, but car/van/truck/bus lost more. Not adopted. Full detail: `00_progress.md` Step 28. |
-| R5 | **Distill from YOLOv8-X** | The 68M-param teacher (AP50 0.47) already sits in dfine_app_server/models/best.pt. Soft-label + feature distillation into D-FINE-S. Strong precedent. | ~1 day code + run | +1–3 AP | Not yet tried |
+| R5 | ~~Distill from YOLOv8-X~~ | ~~The 68M-param teacher (AP50 0.47, mshamrai HuggingFace model-card figure) already sits in dfine_app_server/models/best.pt. Soft-label + feature distillation into D-FINE-S.~~ | ~1 day code + run | +1–3 AP | ❌ **DROPPED 2026-07-07** — independently evaled YOLOv8-X on our own VisDrone val (`tools/eval/eval_yolov8x_visdrone.py`, same faster_coco_eval evaluator): **AP=0.2502** at its native 640px, vs our current best of 0.344. The "teacher" is well below the student — distillation premise doesn't hold. See `00_progress.md` model-comparison section. |
 | R6 | **One-to-many auxiliary matching (H-DETR-lite)** | During training add a duplicated-GT group so multiple queries get positive gradient per GT; one-to-one at eval. Addresses gradient starvation on dense scenes. | moderate code | +1–2 AP | Not yet tried |
 | R7 | **Density-adaptive queries (Dome-DETR-lite)** | Use encoder score mass to pick top-k per image (300→900 on crowded scenes). Answers W4 without paying 900 queries everywhere. | moderate code | +0.5–1 AP dense scenes | Not yet tried |
 | R8 | **Frequency-domain P2/P3 enhancement (EFSI-lite)** | High-pass (wavelet/FFT) branch fused into fine levels — the 2026 VisDrone DETR SOTA's core trick (EFSI: AP 33.1, APs 24.8). | bigger code | +1–2 APs | Not yet tried |

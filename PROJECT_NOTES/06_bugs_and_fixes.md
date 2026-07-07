@@ -1526,3 +1526,33 @@ launch wrapper — this should be the standard way to launch any future
 RunPod training run, superseding the old bare
 `setsid nohup python train.py` + separate local-babysitter pattern for the
 stop-on-completion piece.
+
+---
+
+## BUG-047 — `autostop_launch.sh` (BUG-046's own fix) failed to stop the E6
+pod, second idle-billing leak (2026-07-06)
+
+**Symptom:** E6 (1280 resolution unlock, see `SESSION_HANDOFF_2026-07-05.md`)
+finished its full 50-epoch schedule, but the pod-side `autostop_launch.sh`
+wrapper — built specifically to prevent this — didn't fire. The pod sat idle
+for ~10.6h (~$2.33) before being caught in the following session.
+
+**Fix:** added a second, independent watchdog that runs on the laptop/WSL
+side instead of the pod side, so it doesn't share a failure mode with
+`autostop_launch.sh`: `~/.runpod/watchdog.sh`. Polls the RunPod REST API for
+every `RUNNING` pod every 10 minutes, SSHes in to check for a live
+`train.py` process, and force-stops the pod via API after 2 consecutive
+misses (~20 min grace period to avoid false positives from a transient SSH
+hiccup). Started via
+`setsid nohup bash ~/.runpod/watchdog.sh > ~/.runpod/watchdog.log 2>&1 < /dev/null & disown`
+(wrapper: `~/start_watchdog.sh`) — same detached-from-terminal pattern as the
+old babysitters, but not dependent on the pod's own in-training logic at
+all, so it catches exactly the case where the pod-side mechanism itself is
+the thing that broke. Verify it's alive with `ps aux | grep '[w]atchdog.sh'`.
+Root cause of the original `autostop_launch.sh` miss was not investigated
+(not worth the time for a single occurrence) — this is a defense-in-depth
+backstop, not a fix to the original mechanism, so both now run.
+
+E6 checkpoints (`e6_1280_best_ep46.pth`, `e6_1280_last_ep49.pth`) were
+already retrieved to `output/runpod_results/` before this was caught, so no
+data was at risk — only the idle billing.

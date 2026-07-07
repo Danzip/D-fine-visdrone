@@ -104,6 +104,15 @@ Previous best (epoch 9, flat LR): **0.170** → now **0.231** — **+36% improve
 Gap vs DroneScan-YOLO: ~4.2 AP points. Their advantages: RPA-Block dynamic filtering, MSFD P2 branch, SAL-NWD hybrid loss, square 1280×1280.
 More uncomfortable: Drone-DETR gets 0.339 at **640×640** (28.7M params) — architecture/loss differences, not resolution.
 
+**Caveat (2026-07-07): all of the above are paper-reported numbers, not
+independently reproduced.** A search for DroneScan-YOLO's official published
+weights (to run it ourselves and confirm the 0.356 figure / compare
+side-by-side under our own eval harness) came up empty — no public
+checkpoint release was found. Every "gap to SOTA" comparison in this project
+(including E6's "~0.012 off SOTA") is therefore trusting the paper's
+self-reported number, not a verified apples-to-apples eval. Don't cite these
+gaps as more precise than that.
+
 ### Checkpoint location
 `output/dfine_hgnetv2_s_visdrone/best_stg1.pth` (epoch 66)
 W&B run: wandb.ai/danziv/D-FINE
@@ -352,6 +361,26 @@ The frozen encoder gave the decoder *worse* inputs than the unfrozen encoder, so
 |-------|--------|------|---------|-------|
 | D-FINE-S (ours, pruned) | 10M | 0.389 | 0.232 | INT8 on Snapdragon: 47ms/21FPS |
 | YOLOv8-X (mshamrai HuggingFace) | 68M | 0.470 | N/A | 7× larger, stronger on diverse images |
+
+**Update (2026-07-07): independently verified, and it changes R5's premise.**
+Ran `tools/eval/eval_yolov8x_visdrone.py` — YOLOv8-X (best.pt) on our own
+VisDrone val split (548 images, faster_coco_eval, same evaluator D-FINE's
+own numbers use), native 640px (its own training resolution): **AP
+(mAP50:95) = 0.2502**. The AP50=0.470 figure above was the mshamrai
+HuggingFace model-card number (different metric, unverified) — this 0.2502
+is the real, same-eval-set, same-metric comparison.
+
+Despite being **7x larger** (68M vs 10M params), YOLOv8-X only barely beats
+our weakest 640px D-FINE-S baseline (0.231) and is well below our current
+best (E6, 0.344 @ 1280px). **R5 (distill from YOLOv8-X) no longer makes
+sense as planned** — a distillation teacher should outperform the student it
+teaches, and this one doesn't. Dropped from the R-series candidate list;
+see `11_ablation_study_runpod.md` §5.
+
+Also, to be explicit since these get conflated elsewhere in this doc:
+**YOLOv8-X is not the network behind the 0.356 SOTA reference** — that's
+DroneScan-YOLO (see `### SOTA context` above), a completely different
+model/paper.
 
 On VisDrone-style aerial images, both models find all objects with some artifacts.
 Gap is expected — model size difference. Next step is to close this gap.
@@ -667,3 +696,32 @@ large-class cost, but that's a materially bigger undertaking than the
 "$0, eval-only" scope this was budgeted for — not pursued further for now.
 Script: `tools/calibration/calibrate_scores.py`. Full results:
 `output/calibration/r4_results.json`.
+
+---
+
+## Step 29 — E6: 1280 resolution unlock — FINISHED, AP=0.344 (2026-07-06)
+
+Full 50-epoch schedule completed (see `SESSION_HANDOFF_2026-07-05.md` §1 for
+design: tuned from `msfd_1024_best_ep109.pth`, square 1280×1280,
+`reset_score_head_bias` fix, R2+R3 inherited). **Final AP=0.344** — up from
+the pre-E6 standing best of 0.3226, and within ~0.012 of the DroneScan-YOLO
+SOTA precedent (0.356). Best checkpoint at **epoch 46/50**
+(`output/runpod_results/e6_1280_best_ep46.pth`), last at epoch 49
+(`..._last_ep49.pth`) — best landing a few epochs before the final one
+suggests the run had plateaued rather than still climbing, so the
+pre-authorized resume-with-low-LR contingency was not triggered. (Not
+confirmed against the full per-epoch trajectory/wandb log — revisit if that
+assumption matters later.)
+
+**Incident during this run:** the pod itself sat idle for ~10.6h (~$2.33)
+after training finished because `autostop_launch.sh` didn't fire as
+expected — see `06_bugs_and_fixes.md` BUG-047. A second, independent
+laptop-side watchdog (`~/.runpod/watchdog.sh`) was added as a backstop.
+Checkpoints were already safely retrieved before this was caught.
+
+**Next up, per the priority order in `SESSION_HANDOFF_2026-07-05.md`:**
+1. Deployment reality-check — ONNX export + INT8 quant + real latency
+   benchmark on target edge hardware (not done yet; 1280 is ~4x the compute
+   of the last benchmarked config).
+2. msfd/P2 vs plain architecture control experiment at 1280.
+3. Lower priority: R4 re-run on E6 checkpoint, R5 distillation, R6-R10.
