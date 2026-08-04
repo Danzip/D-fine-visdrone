@@ -16,6 +16,8 @@ opencv-python-headless>=4.8.0
 Pillow>=10.0
 numpy>=1.24
 scipy
+supervision>=0.29.0   # ByteTrack multi-object tracking
+boxmot>=19.0.0        # BoT-SORT / StrongSORT / OC-SORT / DeepOCSORT multi-object tracking
 
 # Utilities
 tqdm

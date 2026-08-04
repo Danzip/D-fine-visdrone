@@ -1556,3 +1556,39 @@ backstop, not a fix to the original mechanism, so both now run.
 E6 checkpoints (`e6_1280_best_ep46.pth`, `e6_1280_last_ep49.pth`) were
 already retrieved to `output/runpod_results/` before this was caught, so no
 data was at risk — only the idle billing.
+
+---
+
+## BUG-048 — ByteTrack low-score recovery pass silently disabled by
+pre-filtering detections (2026-08-03)
+
+**Symptom:** first ByteTrack integration (`tools/tracking/track_video.py`)
+showed severe ID fragmentation on a dense VisDrone-MOT test sequence: 1,039
+unique tracks predicted vs. 184 ground-truth objects (5.6x inflation),
+median track length only 18/233 frames.
+
+**Root cause:** `detect()` filtered detections to `score >= threshold`
+(0.3) before constructing `sv.Detections` and handing them to the tracker.
+But ByteTrack's entire design point — the "BYTE" in the name — is a
+two-stage association that uses *low-confidence* detections (down to a
+hard-coded `score > 0.1` floor in `supervision`'s
+`byte_tracker/core.py`) to recover tracks through brief occlusion/blur that
+a high-confidence-only detector would drop. Pre-filtering to 0.3 meant
+every detection in the 0.1-0.3 range — exactly the ones a briefly
+occluded/blurry object drops to — never reached the tracker at all,
+disabling that recovery pass entirely without any error or warning.
+
+**Fix:** detections are now passed through down to `--conf-low` (default
+0.1, matching ByteTrack's own internal floor), and `--conf-high` (default
+0.3) is passed as `track_activation_threshold` so the tracker itself
+decides the high/low split and which tracks to actually emit — the
+external pre-filter no longer does that job. Combined with a camera-motion-
+compensation fix (see `12_tracking.md`), this took the test sequence from
+1,039 tracks (5.6x GT) to 670 tracks (3.6x GT), median track length 18 ->
+52 frames.
+
+**Lesson:** when wrapping a third-party tracking/matching algorithm, check
+its source for hard-coded internal thresholds before adding your own
+pre-filter — an external filter that's stricter than what the algorithm
+expects doesn't error, it just quietly deletes the signal the algorithm
+was designed to use.
