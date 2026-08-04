@@ -271,7 +271,7 @@ python tools/tracking/compare_trackers.py \
 | **StrongSORT** (Re-ID) | **335** | **1.82x** | 3.1 |
 | DeepOCSORT (motion + Re-ID) | 664 | 3.61x | 4.2 |
 
-**Appearance (Re-ID) matching roughly halves track fragmentation** vs. motion-only tracking on this dense, panning aerial scene — BoT-SORT is the practical pick (best speed/accuracy tradeoff); StrongSORT if accuracy is the only axis that matters. Full methodology, a bug fix (ByteTrack's low-confidence recovery pass was silently disabled by an over-eager pre-filter — BUG-048), and a profiling deep-dive into why tracker FPS doesn't scale with detection count the way you'd expect are in `PROJECT_NOTES/12_tracking.md`.
+**Appearance (Re-ID) matching roughly halves track fragmentation** vs. motion-only tracking on this dense, panning aerial scene — BoT-SORT is the practical pick (best speed/accuracy tradeoff); StrongSORT if accuracy is the only axis that matters. Full methodology, a bug fix (ByteTrack's low-confidence recovery pass was silently disabled by an over-eager pre-filter — BUG-049), and a profiling deep-dive into why tracker FPS doesn't scale with detection count the way you'd expect are in `PROJECT_NOTES/12_tracking.md`.
 
 ---
 

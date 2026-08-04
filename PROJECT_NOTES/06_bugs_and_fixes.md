@@ -1559,7 +1559,7 @@ data was at risk — only the idle billing.
 
 ---
 
-## BUG-048 — ByteTrack low-score recovery pass silently disabled by
+## BUG-049 — ByteTrack low-score recovery pass silently disabled by
 pre-filtering detections (2026-08-03)
 
 **Symptom:** first ByteTrack integration (`tools/tracking/track_video.py`)
