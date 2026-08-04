@@ -243,6 +243,38 @@ python tools/inference/tta_inf.py \
 
 ---
 
+## Multi-Object Tracking
+
+Adds ByteTrack — and, via `boxmot`, BoT-SORT/StrongSORT/OC-SORT/DeepOCSORT — on top of D-FINE detections to track objects across video. Tested on real aerial footage from VisDrone2019-MOT (the DET data used above has no video/sequences of its own).
+
+```bash
+# Track with ByteTrack (fixed low-confidence recovery pass + camera motion compensation)
+python tools/tracking/track_video.py \
+    -c experiments/e6_1280/config.yml \
+    -r output/runpod_results/e6_1280_best_ep46.pth \
+    --video path/to/input.mp4 --output output/tracked.mp4 --device cuda:0
+
+# Compare all 5 trackers on the same cached D-FINE detections (fair, single-pass comparison)
+python tools/tracking/compare_trackers.py \
+    -c experiments/e6_1280/config.yml \
+    -r output/runpod_results/e6_1280_best_ep46.pth \
+    --video path/to/input.mp4 --output-dir output/tracking/compare --device cuda:0
+```
+
+**Tracker comparison** (VisDrone-MOT `uav0000137_00458_v`, 233 frames, 184 ground-truth tracks, dense street intersection):
+
+| Tracker | Unique tracks | vs. 184 GT | FPS |
+|---|---|---|---|
+| ByteTrack (motion-only + GMC) | 670 | 3.64x | 10.8 |
+| OC-SORT (motion-only) | 660 | 3.59x | 13.8 |
+| **BoT-SORT** (GMC + Re-ID) | **362** | **1.97x** | 7.2 |
+| **StrongSORT** (Re-ID) | **335** | **1.82x** | 3.1 |
+| DeepOCSORT (motion + Re-ID) | 664 | 3.61x | 4.2 |
+
+**Appearance (Re-ID) matching roughly halves track fragmentation** vs. motion-only tracking on this dense, panning aerial scene — BoT-SORT is the practical pick (best speed/accuracy tradeoff); StrongSORT if accuracy is the only axis that matters. Full methodology, a bug fix (ByteTrack's low-confidence recovery pass was silently disabled by an over-eager pre-filter — BUG-049), and a profiling deep-dive into why tracker FPS doesn't scale with detection count the way you'd expect are in `PROJECT_NOTES/12_tracking.md`.
+
+---
+
 ## Flutter App + Inference Server
 
 A web app that runs D-FINE-S and YOLOv8-X side-by-side on any image.
