@@ -1,6 +1,6 @@
 # Experiment: MSFD P2 fusion @ 1024×1024 + NWD matcher + SAL linear (1/area)
 
-## Status: PLANNED
+## Status: DONE — became the flagship P2ConvHead lineage
 
 ## What this tests
 Same as msfd_p2_640 but at 1024×1024 — only practical on RunPod (24GB VRAM).
@@ -37,4 +37,4 @@ Phase 2 (epochs 50–110):
 ## Results
 | Epoch | AP50:95 | AP-small | Notes |
 |-------|---------|----------|-------|
-| — | — | — | not started |
+| 109 (best) | 0.3219 | - | `output/runpod_results/msfd_1024_best_ep109.pth` — pushed past the 0.321 starting point. Later polished to 0.3226 (`msfd_1024_polish2`), then tuned to 1280px for the current overall best (0.344, `experiments/e6_1280/`) |

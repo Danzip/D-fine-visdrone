@@ -6,19 +6,22 @@ Fine-tuning [D-FINE](https://arxiv.org/abs/2410.13842) (ICLR 2025) on the VisDro
 
 ## Results
 
+The model starts from COCO-pretrained D-FINE-S weights (see `PROJECT_NOTES/00_progress.md`);
+every row below is measured on VisDrone val.
+
 | Stage | AP50:95 | AP50 | AP-small | Latency | Model Size |
 |-------|---------|------|----------|---------|------------|
-| COCO pretrained (baseline) | 48.5% (COCO val) | 65.4% | - | - | 38 MB FP32 |
 | VisDrone fine-tuned (640px) | 23.1% | 38.9% | 14.2% | - | 38 MB FP32 |
 | + Structured pruning + recovery | 23.2% | - | - | - | ~28 MB FP32 |
 | Multi-scale training 1024px (80 ep) | 25.5% | 42.4% | 17.8% | - | 38 MB FP32 |
 | + Extended training (131 ep) | 29.7% | 47.9% | 20.8% | - | 38 MB FP32 |
 | + Mosaic + multi-scale retraining (160 ep) | 31.6% | 50.7% | 22.5% | - | 38 MB FP32 |
 | + NWD matching + size-adaptive loss (ep109) | 32.1% | 50.4% | 23.0% | - | 38 MB FP32 |
-| + P2 conv head + P2FusionLite + NWD-loss + rare CopyPaste, ultra-low-LR polish (RunPod, 2026-07-04) | **32.26%** | - | **23.44%** | - | 38 MB FP32 |
+| + P2 conv head + P2FusionLite + NWD-loss + rare CopyPaste, ultra-low-LR polish (RunPod, 2026-07-04) | 32.26% | - | 23.44% | - | 38 MB FP32 |
+| + 1280px resolution unlock via score-head bias reset (E6, RunPod, 2026-07-06) — current best | **34.4%** | **54.9%** | **25.7%** | - | 38 MB FP32 |
 | INT8 on Snapdragon 8 Gen 2 | - | - | - | **47 ms / 21 FPS** | **10 MB INT8** |
 
-SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **32.26%** with 10M params as a general-purpose detector fine-tuned on VisDrone - gap to same-size SOTA is ~3.3 AP points, primarily due to domain-specific architecture choices (custom small-object heads, aerial-specific FPN). 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded) — note the INT8/latency figures above are from the 32.1% checkpoint; the 32.26% checkpoint has not yet been re-deployed. A follow-up RunPod campaign (`PROJECT_NOTES/11_ablation_study_runpod.md`) tested a P2 conv-head architecture (this row), plus several augmentation/loss ideas on the simpler non-P2 architecture (crop-zoom, NWD regression loss, rare-class CopyPaste) that did not beat the P2 result; per-class score calibration and a 1280px resolution unlock (AIFI positional-embedding interpolation) are the current next steps — see that doc for details.
+SOTA context (VisDrone val, standard eval): DroneScan-YOLO (2026) = 35.6% (10M params, purpose-built for aerial; this figure was never independently reproduced — the paper's weights were never found publicly, treat it as directional, not verified), Drone-DETR (2024) = 33.9%, VRF-DETR (2024) = 32.2%, RT-DETR-R50 (2023) = 28.4%. D-FINE-S reaches **34.4%** with 10M params as a general-purpose detector fine-tuned on VisDrone — within ~1.2 AP of the (unverified) DroneScan-YOLO figure and already ahead of Drone-DETR/VRF-DETR, despite no aerial-specific architecture beyond the added P2 head. 100% NPU utilization on Hexagon v73 (1316/1317 ops offloaded) — note the INT8/latency figures above are from the older 32.1% checkpoint; neither the 32.26% nor the current-best 34.4% checkpoint has been re-deployed yet. A follow-up RunPod campaign (`PROJECT_NOTES/11_ablation_study_runpod.md`) tested the P2 conv-head architecture and several augmentation/loss ideas (crop-zoom, NWD regression loss, rare-class CopyPaste) that did not beat the P2 result; the 1280px resolution unlock that produced the current best (E6, `experiments/e6_1280/`) turned out to be a score-head bias-reset fix, not AIFI positional-embedding interpolation as originally planned — AIFI's sin-cos position embeddings are recomputed fresh per forward pass and never needed interpolation. See that doc and `experiments/e6_1280/config.yml`'s header comment for the full root-cause writeup.
 
 ### Per-class AP - epoch-131 checkpoint (baseline for Mosaic+RFS retraining)
 
@@ -42,7 +45,7 @@ The two rarest classes (awning-tricycle 1%, tricycle 3%) are the weakest. RFS ov
 
 ## Inference-Time Ablation (no retraining)
 
-All experiments run on the epoch-131 checkpoint (AP=29.7%, 1024px eval). Multi-scale training already internalizes the benefits that inference-time tricks try to add - none improved on standard eval. Full analysis in `PROJECT_NOTES/11_eval_ablations.md`.
+All experiments run on the epoch-131 checkpoint (AP=29.7%, 1024px eval). Multi-scale training already internalizes the benefits that inference-time tricks try to add - none improved on standard eval. Full analysis in `PROJECT_NOTES/00_progress.md` (Step 14) and `PROJECT_NOTES/11_ablation_study_runpod.md`.
 
 | Method | AP50:95 | AP-small | Delta | Verdict |
 |--------|---------|----------|-------|---------|
@@ -75,15 +78,17 @@ All experiments run on the epoch-131 checkpoint (AP=29.7%, 1024px eval). Multi-s
 - **Multi-scale training from COCO (not from 640px checkpoint)** - 4 direct attempts to train at 960–1280px all failed (AP flatlined at 0.11–0.13); root cause was anchor grid collapse when jumping from 8,400 → 19,320 positions. The fix: start from the COCO checkpoint with multi-scale [768–1280] from epoch 0, so the model never locks into a single-scale prior. This lifted AP from 0.231 → 0.297 (+28%).
 - **Adaptive batch size over fixed batch** - training at 1280px with fixed batch=2 would waste capacity at 768px and OOM at 1280px; adaptive batch keeps total pixel budget constant (`n ∝ (base_size/sz)²`), giving effective batch=8 across all scales
 - **ONNX + Qualcomm AI Hub over on-device PyTorch** - AI Hub handles Hexagon NPU mapping and INT8 quantization automatically; offloads hardware-specific compiler complexity and gives profiling data (latency, memory, NPU utilization) without owning a device
+- **Score-head bias reset unlocks resolution jumps, not AIFI interpolation** - 4 earlier attempts to train at higher resolution from an already-adapted checkpoint collapsed (AP 0.11-0.13); the actual cause was `enc_score_head`/`dec_score_head` biases staying miscalibrated for a denser anchor grid, not AIFI's position embeddings (already resolution-agnostic, recomputed per forward pass). Resetting just those biases before tuning to 1280px lifted AP 32.26% → 34.4%
 
 ---
 
 ## Limitations
 
-- AP trails published VisDrone-specific SOTA (32.1% vs 35.6% DroneScan-YOLO) - gap is primarily architectural: purpose-built models add a P2 stride-4 detection head and NWD loss tuned for sub-16px objects; D-FINE-S uses a general-purpose FPN without aerial-specific modifications
-- Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 21.1% (up from 14.2% at 640px, but still low - awning-tricycle and bicycle AP are well below the mean)
-- All inference-time tricks tested (SAHI, TTA, SWA, higher eval resolution) failed to improve over standard eval - the model's multi-scale training already internalizes what these try to add
-- Current best (32.1%, ep109) is NWD matching + sqrt size-adaptive loss; next experiments target MSFD-style P2 fusion and linear 1/area SAL to close the remaining ~3.5 AP gap to DroneScan-YOLO
+- AP trails the unverified DroneScan-YOLO figure (34.4% vs 35.6%) by ~1.2 points, and is already ahead of Drone-DETR (33.9%) / VRF-DETR (32.2%) / RT-DETR-R50 (28.4%) - closer than earlier checkpoints since the P2 stride-4 head and NWD loss (added in the P2/E6 lineage) already target the aerial-specific gap that used to be the main limitation
+- Tiny crowded objects (46–53% of VisDrone instances are < 32px) remain the hardest case; AP-small is 25.7% (up from 14.2% at 640px, but still the weakest area - awning-tricycle and bicycle AP are well below the mean, see per-class table above)
+- All inference-time tricks tested at the pre-P2 checkpoint (SAHI, TTA, SWA, higher eval resolution) failed to improve over standard eval; a from-scratch, train-time-tiled SAHI variant is being tested separately (`PROJECT_NOTES/13_sahi_tiled_training.md`) to see if training on tiles (not just evaluating on them) closes that gap
+- Current best (34.4%, E6/1280px) has not yet been re-deployed through the pruning/ONNX/INT8 pipeline - the Snapdragon latency numbers above are from the older 32.1% checkpoint
+- Next step (lower priority): every SOTA figure above except YOLOv8-X is a paper-reported number, not independently reproduced (DroneScan-YOLO's own weights were never found publicly - see `PROJECT_NOTES/00_progress.md`). Find and evaluate a real, downloadable, comparably strong model with the same protocol used for YOLOv8-X (`tools/eval/eval_yolov8x_visdrone.py`), instead of citing unverified literature numbers
 
 ---
 
@@ -109,9 +114,10 @@ DFine/
 │   ├── src/zoo/dfine/             <- D-FINE decoder, encoder, FDR + GO-LSD losses
 │   ├── src/nn/backbone/           <- HGNetV2 backbone
 │   ├── tools/
-│   │   ├── inference/             <- torch_inf.py, onnx_inf.py, sahi_inf.py
-│   │   ├── deployment/            <- export_onnx_pruned.py, submit_aihub.py
-│   │   └── pruning/               <- prune_dfine.py, recovery_train.py
+│   │   ├── visdrone2coco.py       <- VisDrone .txt annotations -> COCO-format JSON
+│   │   ├── eval/                  <- eval_yolov8x_visdrone.py (YOLOv8-X baseline eval)
+│   │   ├── tracking/              <- track_video.py, compare_trackers.py
+│   │   └── calibration/           <- calibrate_scores.py
 │   ├── train.py                   <- single entry point for training + eval
 │   └── PROJECT_NOTES/             <- lab notebook (all decisions, results, bugs)
 ├── dfine_app_server/              <- FastAPI inference server (D-FINE + YOLOv8)
@@ -121,6 +127,11 @@ DFine/
 └── dfine_app/                     <- Flutter web app
     └── lib/main.dart              <- model selector, camera/gallery picker, box overlay
 ```
+
+Earlier deployment/pruning/ONNX-export tooling (`tools/inference/`, `tools/deployment/`,
+`tools/pruning/`) predates the current `experiments` branch and isn't in this working
+tree — it's preserved in git history on `master` (`git show master:<path>`) if needed
+again. See `PROJECT_NOTES/00_progress.md` Steps 8-9 for what it produced.
 
 ---
 
@@ -154,18 +165,22 @@ pip install wandb                  # optional, for W&B logging
 ## Training
 
 ```bash
-# Fine-tune from COCO pretrained weights on VisDrone
-python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
+# Fine-tune from COCO pretrained weights on VisDrone (base NWD recipe)
+python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_nwd.yml \
     --device cuda:0 --tuning weight/dfine_s_coco.pth
 
-# Override batch size for single-GPU (default config assumes 4×GPU)
-python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
+# Override batch size for single-GPU
+python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_nwd.yml \
     --device cuda:0 --tuning weight/dfine_s_coco.pth \
     -u train_dataloader.total_batch_size=4
 
+# Reproduce the current best checkpoint (P2ConvHead + P2FusionLite + NWD, 1280px)
+python train.py -c experiments/e6_1280/config.yml \
+    --device cuda:0 --tuning output/runpod_results/msfd_1024_best_ep109.pth
+
 # Eval only
-python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --device cuda:0 --test-only --resume output/dfine_hgnetv2_s_visdrone/best_stg1.pth
+python train.py -c experiments/e6_1280/config.yml \
+    --device cuda:0 --test-only --resume output/runpod_results/e6_1280_best_ep46.pth
 ```
 
 **Key flags:**
@@ -174,72 +189,35 @@ python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
 
 ---
 
-## Structured Pruning
+## Structured Pruning + ONNX Deployment (historical)
 
-Removes FFN neurons from the 3 transformer decoder layers using group lasso regularization, then runs a 10-epoch recovery phase. Achieves 41.4% FFN reduction with no AP regression.
+Earlier in the project the checkpoint was structurally pruned (group-lasso on decoder
+FFN neurons, 41.4% FFN reduction with no AP regression) and exported through ONNX to
+Qualcomm AI Hub for INT8 compilation on a Snapdragon 8 Gen 2 NPU (47ms/21FPS, 100% NPU
+utilization). Best pruned checkpoint: `output/pruning_recovery/best_recovery.pth`
+(ONNX: `output/pruning_recovery/best_recovery.onnx`, FFN dims `[598, 780, 423]` from
+`[1024, 1024, 1024]`).
 
-```bash
-# Run pruning loop (saves checkpoint at each epoch, stops when AP drops below floor)
-python tools/pruning/prune_dfine.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --checkpoint output/dfine_hgnetv2_s_visdrone/best_stg1.pth \
-    --output-dir output/pruning --device cuda:0
-
-# Recovery training after pruning
-python tools/pruning/recovery_train.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --pruned-checkpoint output/pruning/best_pruned.pth \
-    --output-dir output/pruning_recovery --device cuda:0
-```
-
-Best checkpoint: `output/pruning_recovery/best_recovery.pth`
-FFN dims after pruning: `[598, 780, 423]` (from `[1024, 1024, 1024]`)
+The scripts that produced this (`tools/pruning/`, `tools/deployment/`, and the generic
+`tools/inference/{torch_inf,onnx_inf,tta_inf}.py`) predate the current `experiments`
+branch and aren't in this working tree — they're preserved in git history on `master`
+(`git show master:<path>`) if needed again. See `PROJECT_NOTES/00_progress.md` Steps 8-9
+for the full pruning/export log.
 
 ---
 
-## ONNX Export + Deployment
+## Tiled (SAHI-style) Training + Inference
 
-```bash
-# Export pruned model to ONNX (handles non-standard FFN dims automatically)
-python tools/deployment/export_onnx_pruned.py \
-    --config configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --checkpoint output/pruning_recovery/best_recovery.pth \
-    --output output/pruning_recovery/best_recovery.onnx
+A from-scratch tiled-training experiment (train and eval both on overlapping 640×640
+windows, 50% overlap, NMS-merged predictions) is in progress — see
+`PROJECT_NOTES/13_sahi_tiled_training.md` and `experiments/sahi_tiled/` for the run log
+and final results. This replaces an earlier, inference-only SAHI ablation (see table
+above) that hurt accuracy, likely because the model was never trained on tiles.
 
-# Submit to Qualcomm AI Hub for INT8 compilation + profiling
-python tools/deployment/submit_aihub.py \
-    --onnx output/pruning_recovery/best_recovery.onnx
-```
-
----
-
-## Inference
-
-```bash
-# PyTorch inference (single image)
-python tools/inference/torch_inf.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    -r output/pruning_recovery/best_recovery.pth \
-    --input image.jpg --device cuda:0
-
-# ONNX inference
-python tools/inference/onnx_inf.py \
-    --onnx output/pruning_recovery/best_recovery.onnx \
-    --input image.jpg
-
-# SAHI (sliced) inference - tested, does NOT improve AP on this model (see ablation table)
-python tools/inference/sahi_inf.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_cont.yml \
-    -r output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
-    --input image.jpg --slice-size 1024
-
-# TTA (multi-scale + flip) - also tested, hurts due to WBF noise; shown for completeness
-python tools/inference/tta_inf.py \
-    -c configs/dfine/dfine_hgnetv2_s_visdrone_ms1280_cont.yml \
-    -r output/dfine_hgnetv2_s_visdrone_ms1280_cont/best_stg1.pth \
-    --ann dataset/visdrone/annotations/instances_val.json \
-    --img-dir dataset/visdrone/VisDrone2019-DET-val/images
-```
+A fresh control measurement (today's best checkpoint, tiled+NMS eval, but *not* trained
+on tiles) confirms the mismatch is severe at this tiling density: AP50:95 0.344 → 0.146
+(-58% relative), AP-large hit hardest (0.626 → 0.242) from objects fragmenting/duplicating
+across the denser 50%-overlap tile grid. This is the number train-time tiling has to beat.
 
 ---
 
@@ -295,13 +273,21 @@ flutter run -d chrome --release
 
 The server loads both models at startup. `POST /detect` accepts `file` + `model` (dfine|yolov8) as multipart form fields. The Flutter app has a model selector dropdown, gallery/camera picker, and a bounding box overlay with per-class colours.
 
-**Model comparison:**
+**Model comparison** (VisDrone val, same 548-image split, same evaluator, maxDets=500):
 
-| Model | Params | AP50:95 | AP50 |
-|-------|--------|---------|------|
-| D-FINE-S (ours, current best) | 10M | 0.321 | 0.504 |
-| D-FINE-S (ours, pruned INT8) | 10M | 0.232 | 0.389 |
-| YOLOv8-X (mshamrai HuggingFace) | 68M | - | 0.470 |
+| Model | Params | AP50:95 | AP50 | AP-small |
+|-------|--------|---------|------|----------|
+| D-FINE-S (ours, current best, E6/1280px) | 10M | 0.344 | 0.549 | 0.257 |
+| D-FINE-S (ours, pruned INT8)* | 10M | 0.232 | 0.389 | - |
+| YOLOv8-X (mshamrai HuggingFace)† | 68M | 0.250 | 0.404 | 0.156 |
+
+\* Predates the P2/E6 architecture (pruned from an earlier, non-P2 lineage) — not a pruned
+version of the current best. AP-small isn't filled in because reading this checkpoint
+needs the FFN-resize loading logic that was only ever in `export_onnx_pruned.py`
+(archived on `master`, out of scope here).
+† Re-measured directly with `tools/eval/eval_yolov8x_visdrone.py` against this repo's own
+VisDrone val split, with the same `maxDets=500` D-FINE's own eval uses — the model card's
+own claimed 0.47 AP50 is a different, unverified measurement.
 
 ---
 
@@ -311,18 +297,12 @@ All decisions, experiments, results, and bugs are documented in `D-FINE/PROJECT_
 
 | File | Contents |
 |------|----------|
-| `00_progress.md` | Step-by-step log, current status |
-| `01_repo_structure.md` | Architecture deep-dive, config system |
-| `02_coco_baseline.md` | COCO baseline: 48.5 mAP reproduced |
-| `03_visdrone_dataset.md` | Dataset stats, class distribution, challenges |
-| `04_finetuning_config.md` | Fine-tuning configuration decisions |
-| `05_wsl2_aws_kubernetes.md` | WSL2 migration + AWS/K8s plan |
-| `06_aws_kubernetes_setup.md` | AWS setup log |
-| `06_bugs_and_fixes.md` | All bugs encountered and fixed (BUG-001 → BUG-017) |
-| `07_pruning.md` | Full pruning results table, epoch-by-epoch |
-| `09_multiscale_training.md` | Multi-scale training runs 1–3, full AP trajectories, why it worked |
-| `10_sota_gap_analysis.md` | Gap to DroneScan-YOLO: what they do differently, what's transferable |
-| `11_eval_ablations.md` | Deep dive: every inference-time trick tried, why each failed |
+| `00_progress.md` | Step-by-step log of every experiment, decision, and result — the primary lab notebook |
+| `06_bugs_and_fixes.md` | All bugs encountered and fixed (BUG-001 → BUG-049) |
+| `10_next_experiments.md` | Ablations: crop-zoom, NWD regression loss, rare-class CopyPaste |
+| `11_ablation_study_runpod.md` | RunPod ablation campaign log (P2 conv-head, resolution unlock, calibration) |
+| `12_tracking.md` | Multi-object tracker comparison (ByteTrack/BoT-SORT/StrongSORT/OC-SORT/DeepOCSORT) |
+| `SESSION_HANDOFF_*.md` | Dated session handoff notes (branch strategy, in-flight run status) |
 
 ---
 

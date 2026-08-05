@@ -1,6 +1,6 @@
 # Experiment: MSFD P2 fusion @ 640×640 + NWD matcher + SAL linear (1/area)
 
-## Status: PLANNED
+## Status: ABANDONED — broken on launch, never fixed/relaunched
 
 ## What this tests
 Lightweight P2 feature fusion (MSFD-style) at 640×640, combined with our best
@@ -44,4 +44,4 @@ layers (random init) train at high LR (1e-4). They converge and then decay toget
 ## Results
 | Epoch | AP50:95 | AP-small | Notes |
 |-------|---------|----------|-------|
-| — | — | — | not started |
+| 1-2 | 0.0 | - | dead on arrival — tuning from a 0.32 checkpoint should give ~0.31 at epoch 0. 3 live bugs found (OOM needing ~14GB, CUDA allocator crash, P2 fusion issue); see `PROJECT_NOTES/11_ablation_study_runpod.md` §W2. Never fixed/relaunched — `msfd_1024` (this dir's 1024px sibling) became the flagship P2 run instead |

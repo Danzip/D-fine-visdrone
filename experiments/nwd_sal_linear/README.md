@@ -1,6 +1,6 @@
 # Experiment: NWD matcher + SAL linear (1/area)
 
-## Status: PLANNED
+## Status: ABANDONED — killed early, regressed vs baseline
 
 ## What this tests
 Same architecture as nwd_sal_sqrt. Only change: switch size-adaptive weighting
@@ -34,4 +34,4 @@ Backbone LR = 0.5× global LR throughout.
 ## Results
 | Epoch | AP50:95 | AP-small | Notes |
 |-------|---------|----------|-------|
-| — | — | — | not started |
+| 35 (killed) | 0.315 | - | regressed from the 0.321 starting point — 1/area linear SAL amplifies a 4×4px box gradient 625× vs a 64×64 box (sqrt's 25×), causing label-noise explosions on the tiniest boxes; see `PROJECT_NOTES/10_next_experiments.md` |
