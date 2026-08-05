@@ -17,32 +17,25 @@ then exporting to ONNX + INT8 quantization for edge deployment.
 # Activate venv (Windows bash)
 source D-FINE/venv/Scripts/activate
 
-# Train
-python train.py -c configs/dfine/dfine_hgnetv2_s_coco.yml --device cuda:0
+# Fine-tune from COCO pretrained weights (base NWD recipe)
+python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone_nwd.yml \
+    --device cuda:0 --tuning weight/dfine_s_coco.pth
 
-# Fine-tune from checkpoint
-python train.py -c configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --device cuda:0 --tuning path/to/pretrained.pth
+# Reproduce the current best checkpoint (P2ConvHead + P2FusionLite + NWD, 1280px)
+python train.py -c experiments/e6_1280/config.yml \
+    --device cuda:0 --tuning output/runpod_results/msfd_1024_best_ep109.pth
 
 # Eval only
-python train.py -c configs/dfine/dfine_hgnetv2_s_coco.yml \
-    --device cuda:0 --test-only --resume path/to/checkpoint.pth
+python train.py -c experiments/e6_1280/config.yml \
+    --device cuda:0 --test-only --resume output/runpod_results/e6_1280_best_ep46.pth
 
 # Override any config value from CLI
 python train.py -c config.yml -u epochs=50 train_dataloader.total_batch_size=8
-
-# ONNX export
-python tools/deployment/export_onnx.py \
-    --config configs/dfine/dfine_hgnetv2_s_visdrone.yml \
-    --checkpoint outputs/best.pth --output outputs/model.onnx
-
-# PyTorch inference
-python tools/inference/torch_inf.py -c configs/... -r checkpoint.pth \
-    --input image.jpg --device cuda:0
-
-# ONNX inference
-python tools/inference/onnx_inf.py --onnx outputs/model.onnx --input image.jpg
 ```
+
+ONNX export / pruning / generic PyTorch+ONNX inference scripts predate the `experiments`
+branch and aren't in this working tree — see `README.md`'s "Structured Pruning + ONNX
+Deployment (historical)" section for what they produced and where they're preserved.
 
 ## Architecture
 
@@ -55,8 +48,10 @@ python tools/inference/onnx_inf.py --onnx outputs/model.onnx --input image.jpg
 - `src/zoo/dfine/hybrid_encoder.py` — RT-DETR neck: AIFI (attention on coarsest scale) + CCFF
 - `src/nn/backbone/hgnetv2.py` — HGNetV2 backbone
 
-Config system uses `__include__` YAML composition. The S-model config
-(`configs/dfine/dfine_hgnetv2_s_coco.yml`) pulls in 5 base files and overrides specific values.
+Config system uses `__include__` YAML composition. The base VisDrone config
+(`configs/dfine/dfine_hgnetv2_s_visdrone_nwd.yml`) pulls in 5 base files and overrides
+specific values; per-experiment configs under `experiments/*/config.yml` typically
+`__include__` the current-best experiment's config and override just what changes.
 
 ## Key Parameters
 
@@ -71,11 +66,9 @@ Config system uses `__include__` YAML composition. The S-model config
 `D-FINE/PROJECT_NOTES/` — all documentation and results live here. Keep it updated.
 Always read the relevant notes before starting any task to understand current project state.
 
-- `00_progress.md` — current step status and results
-- `01_repo_structure.md` — architecture deep-dive
-- `02_coco_baseline.md` — COCO baseline results
-- `03_visdrone_dataset.md` — VisDrone dataset preparation
-- `04_finetuning_config.md` — fine-tuning configuration
-- `05_wsl2_aws_kubernetes.md` — WSL2 migration + AWS/Kubernetes plan
-- `06_aws_kubernetes_setup.md` — AWS setup log (what actually happened)
-- `06_bugs_and_fixes.md` — bugs encountered and fixes applied
+- `00_progress.md` — step-by-step log of every experiment, decision, and result (the primary lab notebook)
+- `06_bugs_and_fixes.md` — bugs encountered and fixes applied (BUG-001 → BUG-049)
+- `10_next_experiments.md` — ablations: crop-zoom, NWD regression loss, rare-class CopyPaste
+- `11_ablation_study_runpod.md` — RunPod ablation campaign log (P2 conv-head, resolution unlock, calibration)
+- `12_tracking.md` — multi-object tracker comparison
+- `SESSION_HANDOFF_*.md` — dated session handoff notes

@@ -1,6 +1,6 @@
 # Experiment: AR-Aware Rectangular Training
 
-## Status: PLANNED
+## Status: DONE (RunPod) — did not beat baseline
 
 ## What this tests
 Our original contribution. VisDrone images are 4:3 (46.7%) and 16:9 (53.3%).
@@ -51,4 +51,7 @@ is not better than stg2's stronger VisDrone adaptation for this experiment.
 ## Results
 | Epoch | AP50:95 | AP-small | Notes |
 |-------|---------|----------|-------|
-| — | — | — | not started |
+| 0 | 0.2625 | - | canvas change (1024² multi-scale → 736×1280) cost ~6 AP instantly |
+| 10 | 0.307 | - | recovering |
+| 61 | 0.3158 | - | |
+| 110 (final) | 0.318 | +0.003 vs baseline | never beat the 0.321 starting checkpoint — 0.3 AP below baseline after 110 epochs; see `PROJECT_NOTES/11_ablation_study_runpod.md` §W-AR |
