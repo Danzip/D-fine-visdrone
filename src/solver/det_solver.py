@@ -16,9 +16,40 @@ import torch
 from ..misc import dist_utils, stats
 from ._solver import BaseSolver
 from .det_engine import evaluate, train_one_epoch
+from .tiled_eval import evaluate_tiled
 
 
 class DetSolver(BaseSolver):
+    def _run_eval(self, module, epoch, dataloader=None, use_wandb=None, **extra):
+        """Standard whole-image eval, or -- if the config has a `tiled_eval:`
+        block -- full-image tiled + NMS-merged eval instead (see
+        experiments/sahi_tiled/config.yml). Same call shape/return either way
+        so the rest of fit()/val() doesn't need to know which ran.
+        """
+        tiled_cfg = self.cfg.yaml_cfg.get("tiled_eval", None)
+        if tiled_cfg:
+            val_ds_cfg = self.cfg.yaml_cfg["val_dataloader"]["dataset"]
+            return evaluate_tiled(
+                module,
+                self.postprocessor,
+                self.device,
+                val_ds_cfg["ann_file"],
+                val_ds_cfg["img_folder"],
+                **tiled_cfg,
+            )
+        dataloader = dataloader if dataloader is not None else self.val_dataloader
+        use_wandb = self.use_wandb if use_wandb is None else use_wandb
+        return evaluate(
+            module,
+            self.criterion,
+            self.postprocessor,
+            dataloader,
+            self.evaluator,
+            self.device,
+            epoch,
+            use_wandb,
+            **extra,
+        )
     def fit(self):
         self.train()
         args = self.cfg
@@ -103,16 +134,7 @@ class DetSolver(BaseSolver):
         }
         if self.last_epoch > 0:
             module = self.ema.module if self.ema else self.model
-            test_stats, coco_evaluator = evaluate(
-                module,
-                self.criterion,
-                self.postprocessor,
-                self.val_dataloader,
-                self.evaluator,
-                self.device,
-                self.last_epoch,
-                self.use_wandb
-            )
+            test_stats, coco_evaluator = self._run_eval(module, self.last_epoch)
             for k in test_stats:
                 best_stat["epoch"] = self.last_epoch
                 best_stat[k] = test_stats[k][0]
@@ -203,17 +225,7 @@ class DetSolver(BaseSolver):
             module = self.ema.module if self.ema else self.model
             torch.cuda.empty_cache()
             # Primary eval: 16:9 canvas — drives best_stat and checkpoint saving
-            test_stats, coco_evaluator = evaluate(
-                module,
-                self.criterion,
-                self.postprocessor,
-                self.val_dataloader,
-                self.evaluator,
-                self.device,
-                epoch,
-                self.use_wandb,
-                output_dir=self.output_dir,
-            )
+            test_stats, coco_evaluator = self._run_eval(module, epoch, output_dir=self.output_dir)
 
             # Secondary eval: 4:3 canvas — informational, logged with "43_" prefix
             if self.val_dataloader_43 is not None:
@@ -353,18 +365,9 @@ class DetSolver(BaseSolver):
         self.eval()
 
         module = self.ema.module if self.ema else self.model
-        test_stats, coco_evaluator = evaluate(
-            module,
-            self.criterion,
-            self.postprocessor,
-            self.val_dataloader,
-            self.evaluator,
-            self.device,
-            epoch=-1,
-            use_wandb=False,
-        )
+        test_stats, coco_evaluator = self._run_eval(module, epoch=-1, use_wandb=False)
 
-        if self.output_dir:
+        if self.output_dir and coco_evaluator is not None:
             dist_utils.save_on_master(
                 coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval.pth"
             )

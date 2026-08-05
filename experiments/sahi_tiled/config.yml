@@ -1,0 +1,99 @@
+# SAHI-style tiled training: train AND eval on overlapping 640x640 tiles
+# (50% overlap / stride 320px), closing the train/inference mismatch that
+# likely explains why an earlier inference-only SAHI ablation hurt accuracy
+# (28.0-28.3% vs 29.7% standard eval -- see README.md's Inference-Time
+# Ablation table, PROJECT_NOTES/00_progress.md Step 14).
+#
+# Starts from a FRESH COCO-pretrained checkpoint (weight/dfine_s_coco.pth),
+# not an already VisDrone-adapted one -- a cleaner test of whether tiling
+# itself unlocks gains, not confounded by inherited full-image-trained
+# biases. This exact combination (raw COCO backbone + the P2ConvHead/
+# P2FusionLite/NWD architecture) has never been tuned from COCO before --
+# every prior run in this lineage (msfd_1024, e6_1280, ...) started from an
+# already VisDrone-adapted checkpoint. No precedent to derive epoch/warmup
+# numbers from; the long warmup below is a deliberate hedge against the
+# early-collapse pattern in PROJECT_NOTES/11_ablation_study_runpod.md (W3:
+# naive resolution jumps flatlined at AP 0.11-0.13).
+#
+# Ground truth (train) is pre-tiled OFFLINE by
+# tools/tiling/build_tiled_visdrone.py (run on the training machine/pod
+# after `git pull` -- output is gitignored, not committed). Eval always
+# runs against the REAL, un-tiled val images via tools/tiling/tiled_eval.py,
+# which slices + infers + NMS-merges at eval time using the identical tile
+# geometry (src/data/tiling.py) as the offline train-set builder, so
+# train-time and eval-time tiling match. See PROJECT_NOTES/13_sahi_tiled_training.md
+# for the full run log and results once available.
+
+__include__: ['../msfd_1024/config.yml']
+
+output_dir: ./output/sahi_tiled
+exp_name: sahi_tiled
+
+tuning: weight/dfine_s_coco.pth
+reset_score_head_bias: True
+
+eval_spatial_size: [640, 640]
+
+# Every eval against this config -- per-epoch training validation AND
+# --test-only -- uses full-image tiled + NMS-merged eval (src/solver/tiled_eval.py),
+# not a whole-image resize proxy. Checkpoint selection is driven by the metric
+# this model is actually meant to be good at.
+tiled_eval:
+  tile: 640
+  overlap: 0.5
+  nms_iou: 0.5
+  threshold: 0.3
+
+epochs: 200
+lr_scheduler:
+  type: WarmupCosineHoldLR
+  warmup_epochs: 80
+  cosine_epochs: 120
+  warmup_start_lr: 0.00000001
+  eta_min: 0.0000001
+  milestones: ~
+  gamma: ~
+
+train_dataloader:
+  total_batch_size: 32   # tune up on the pod -- 640px on this ~10M-param model
+                          # with a large-VRAM GPU should support far more than
+                          # msfd_1024's 8 at 1024px; find the largest that fits
+  dataset:
+    img_folder: dataset/visdrone_tiled/train/images
+    ann_file: dataset/visdrone_tiled/train/instances_train_tiled.json
+    transforms:
+      ops:
+        # No Mosaic here -- tiles are already small crops; mosaicing 4
+        # unrelated tile-crops together is a different (untested) thing
+        # than mosaicing full images, unlike every other op below.
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [640, 640]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: CopyPasteSmallObjects, max_size: 32, num_paste: 10, p: 0.5,
+           rare_labels: [2, 6, 7], rare_boost: 3.0, scale_jitter: [0.7, 1.4]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: 160
+        ops: ['RandomPhotometricDistort', 'RandomIoUCrop', 'CopyPasteSmallObjects']
+  collate_fn:
+    stop_epoch: 0     # tiles are already a fixed 640x640 crop -- no multi-scale needed
+    base_size: 640
+    base_size_repeat: ~
+    adaptive_batch: True
+    ema_restart_decay: 0.9999
+
+val_dataloader:
+  # Left pointing at the ORIGINAL (untiled) val set on purpose -- evaluate_tiled
+  # (triggered by tiled_eval: above) reads img_folder/ann_file straight from
+  # this dataset config and does its own tiling/inference/NMS directly from
+  # disk, bypassing this dataloader's transforms entirely (they're inherited
+  # from msfd_1024 but unused while tiled_eval: is set).
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
